@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Multiplayer Tag</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="ui">
+    <div id="menu" class="panel">
+      <h1>Tag!</h1>
+      <input id="playerName" placeholder="Your name" maxlength="16" />
+      <div class="row">
+        <button id="createBtn">Create Room</button>
+      </div>
+      <div class="row">
+        <input id="roomCode" placeholder="Room Code" maxlength="6" class="code" />
+        <button id="joinBtn">Join</button>
+      </div>
+      <p class="small">Share room code so friends can join.</p>
+    </div>
+    <div id="statusBar" class="hidden">
+      <span id="roomLabel"></span>
+      <span id="timer"></span>
+      <span id="tagger"></span>
+      <button id="startGameBtn" class="smallBtn hidden">Start Game</button>
+    </div>
+    <div id="playerList" class="playerList hidden"></div>
+    <div id="countdown" class="overlay hidden"></div>
+    <div id="gameOver" class="overlay hidden">
+      <h2>Game Over</h2>
+      <div id="results"></div>
+      <button id="backToMenu">Back</button>
+    </div>
+  </div>
+  <canvas id="game" width="1600" height="720"></canvas>
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="module" src="client.js"></script>
+</body>
+</html>

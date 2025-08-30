@@ -1,0 +1,26 @@
+body { margin:0; font-family: 'Helvetica Neue', Arial, sans-serif; background: linear-gradient(#87ceeb,#e0f8ff); height:100vh; overflow:hidden; color:#222; }
+#game { display:block; margin:0 auto; background: linear-gradient(#87ceeb 60%, #ffffff 100%); border:4px solid #fff; box-shadow:0 0 20px rgba(0,0,0,0.2); }
+.panel { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(255,255,255,0.9); padding:24px 32px; border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,0.2); text-align:center; }
+.panel h1 { margin-top:0; font-size:48px; background: linear-gradient(90deg,#ff6a00,#ffb347); background-clip:text; -webkit-background-clip:text; -webkit-text-fill-color:transparent; color:transparent; }
+input { padding:10px 14px; border:2px solid #79c5ff; border-radius:8px; font-size:16px; }
+input.code { text-transform:uppercase; width:120px; }
+button { cursor:pointer; background: linear-gradient(90deg,#4caf50,#8bc34a); color:#fff; border:none; padding:10px 18px; border-radius:8px; font-size:16px; font-weight:600; transition:.2s; }
+button:hover { filter:brightness(1.1); }
+button.smallBtn { padding:6px 14px; font-size:14px; background:linear-gradient(90deg,#ff9800,#ffc107); color:#222; }
+button.smallBtn:hover { filter:brightness(1.05); }
+.row { margin:10px 0; display:flex; gap:10px; justify-content:center; }
+.small { font-size:12px; color:#444; }
+.hidden { display:none !important; }
+#statusBar { position:fixed; top:0; left:0; right:0; background:rgba(255,255,255,0.85); padding:6px 14px; display:flex; gap:24px; font-weight:600; letter-spacing:.5px; }
+.overlay { position:absolute; top:0; left:0; right:0; bottom:0; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(255,255,255,0.85); font-size:120px; font-weight:700; color:#ff5722; text-shadow:0 4px 10px rgba(0,0,0,0.2); }
+#gameOver { font-size:18px; }
+#gameOver h2 { font-size:48px; margin:0 0 12px; color:#ff5722; }
+#results { margin:10px 0 24px; max-width:420px; text-align:left; }
+#results div { background:#fff; border-radius:8px; padding:8px 12px; margin:6px 0; box-shadow:0 2px 6px rgba(0,0,0,0.15); }
+ .playerList { position:fixed; top:60px; right:12px; width:220px; background:rgba(255,255,255,0.9); border-radius:14px; padding:10px 14px 14px; box-shadow:0 4px 16px rgba(0,0,0,0.2); font-size:14px; max-height:70vh; overflow:auto; }
+ .playerList h3 { margin:4px 0 8px; font-size:16px; color:#ff6a00; letter-spacing:.5px; }
+ .playerRow { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:8px; background:linear-gradient(90deg,#ffffff,#f7fafc); margin:2px 0; position:relative; }
+ .playerRow.leader { border:2px solid #ff9800; }
+ .tagBadge { background:#ff3d00; color:#fff; padding:2px 6px; border-radius:6px; font-size:10px; font-weight:700; letter-spacing:.5px; }
+ .leaderBadge { background:#ffc107; color:#222; padding:2px 6px; border-radius:6px; font-size:10px; font-weight:700; letter-spacing:.5px; }
+ .selfBadge { background:#2196f3; color:#fff; padding:2px 6px; border-radius:6px; font-size:10px; font-weight:700; }
