@@ -21,10 +21,13 @@ Bright, sunny, realtime multiplayer 2D tag game. One player is "It" (the tagger)
 	- Opt-in local prediction (horizontal & vertical) with soft reconciliation
 	- Idle spawn stability (prediction activates only after first input)
 - Bright, colorful UI (sky blue, greens, oranges) with overlay feedback
+ - Decorative background (gradient sky, animated sun glow, drifting clouds, birds)
+ - Animated character rendering (body bob, arm/leg swing, tag badge) & grass platform styling
 
 ## Tech Stack
 Frontend: HTML, CSS, JavaScript (Canvas)
 Backend: Node.js, Express static server, Socket.IO realtime
+ Rendering: Custom Canvas 2D scene decorator (no external art pipeline yet)
 
 ## Run Locally
 

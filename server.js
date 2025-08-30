@@ -17,7 +17,7 @@ app.use(express.static('public'));
 const GAME_DURATION_MS = 120_000; // configurable
 const PRE_GAME_COUNTDOWN_MS = 3000;
 const TICK_RATE = 60; // server authoritative tick in Hz
-const TAG_COOLDOWN_MS = 2000; // cooldown between two same players tagging each other again
+const TAG_COOLDOWN_MS = 2000; // (legacy) time cooldown no longer used; kept for config reference
 const TAGGER_SPEED_MULT = 1.08; // slight edge
 const BASE_SPEED = 220; // units per second
 // Tuned jump: increase vertical reach so players can climb successive platforms naturally.
@@ -34,15 +34,47 @@ const JUMP_SHORT_HOP_FACTOR = 0.35; // velocity multiplier on early release
 const COYOTE_MS = 80; // grace period after leaving ground to still jump
 const JUMP_BUFFER_MS = 90; // buffer window for jump pressed slightly before landing
 
+// Player color palette (shirt/body accent base colors)
+const COLOR_PALETTE = [
+  '#2196f3', '#ff9800', '#9c27b0', '#4caf50', '#e91e63', '#ff5722', '#3f51b5', '#009688'
+];
+// Simple platform layout (x, y, width, height). y=0 is ground baseline.
+// const PLATFORMS = [
+//   { x: 0, y: 0, w: 1600, h: 40 },
+//   { x: 300, y: 240, w: 1000, h: 30 },
+//   { x: 100, y: 420, w: 400, h: 24 },
+//   { x: 1100, y: 420, w: 400, h: 24 },
+//   { x: 600, y: 560, w: 400, h: 24 }
+// ];
 // Simple platform layout (x, y, width, height). y=0 is ground baseline.
 const PLATFORMS = [
-  // ground
+  // Ground platform
   { x: 0, y: 0, w: 1600, h: 40 },
-  // middle main spawn platform
-  { x: 300, y: 240, w: 1000, h: 30 },
-  { x: 100, y: 420, w: 400, h: 24 },
-  { x: 1100, y: 420, w: 400, h: 24 },
-  { x: 600, y: 560, w: 400, h: 24 }
+  
+  // Lower level platforms
+  { x: 200, y: 180, w: 200, h: 30 },
+  { x: 500, y: 220, w: 300, h: 30 },
+  { x: 950, y: 180, w: 200, h: 30 },
+  
+  // Middle level platforms
+  { x: 100, y: 360, w: 180, h: 24 },
+  { x: 400, y: 400, w: 150, h: 24 },
+  { x: 700, y: 360, w: 150, h: 24 },
+  { x: 1000, y: 400, w: 180, h: 24 },
+  { x: 1300, y: 360, w: 180, h: 24 },
+  
+  // Upper level platforms
+  { x: 300, y: 540, w: 200, h: 24 },
+  { x: 750, y: 580, w: 300, h: 24 },
+  
+  // Diagonal platforms (approximated with multiple small platforms)
+  { x: 450, y: 300, w: 100, h: 24 },
+  { x: 550, y: 340, w: 100, h: 24 },
+  { x: 650, y: 380, w: 100, h: 24 },
+  
+  // Additional platforms to fill in gaps
+  { x: 850, y: 480, w: 120, h: 24 },
+  { x: 1150, y: 520, w: 120, h: 24 }
 ];
 
 function defaultPlayerState(id, name) {
@@ -67,6 +99,7 @@ function defaultPlayerState(id, name) {
   bufferedJumpTime: 0,
   lastReceivedInputSeq: 0,
   lastProcessedInputSeq: 0,
+  color: null, // assigned when added to room
   };
 }
 
@@ -81,7 +114,9 @@ class GameRoom {
     this.lastTick = Date.now();
     this.lastBroadcast = 0;
     this.taggerId = null;
-    this.lastTagPairCooldown = new Map(); // key: `${a}|${b}` sorted
+  this.lastTagPairCooldown = new Map(); // deprecated (time-based) not used now
+  this.blockedContactPairs = new Set(); // pair keys that must separate before re-tag
+  this._colorIndex = 0;
   }
 
   addPlayer(socket, name) {
@@ -89,6 +124,9 @@ class GameRoom {
     this.players.set(socket.id, player);
   // assign leader if none
   if (!this.leaderId) this.leaderId = socket.id;
+  // assign color from palette cycling
+  player.color = COLOR_PALETTE[this._colorIndex % COLOR_PALETTE.length];
+  this._colorIndex++;
   }
 
   removePlayer(id) {
@@ -244,24 +282,32 @@ class GameRoom {
     if (this.state !== 'running') return;
     const tagger = this.players.get(this.taggerId);
     if (!tagger) return;
+    const TAG_RADIUS = 40;
+    const inRangePairs = new Set();
+    // Check potential transfers
     for (const player of this.players.values()) {
       if (player.id === tagger.id) continue;
       const dx = player.x - tagger.x;
       const dy = player.y - tagger.y;
       const distSq = dx*dx + dy*dy;
-      if (distSq < 40*40) { // tag radius 40 units
+      if (distSq < TAG_RADIUS*TAG_RADIUS) {
         const key = this.cooldownKey(tagger.id, player.id);
-        const last = this.lastTagPairCooldown.get(key) || 0;
-        const now = Date.now();
-        if (now - last >= TAG_COOLDOWN_MS) {
-          // transfer tag
+        inRangePairs.add(key);
+        if (!this.blockedContactPairs.has(key)) {
+          // Transfer tag immediately on first contact
           tagger.isTagger = false;
           player.isTagger = true;
           this.taggerId = player.id;
-          this.lastTagPairCooldown.set(key, now);
+          // Block this pair until they separate
+          this.blockedContactPairs.add(key);
           io.to(this.code).emit('tag', { taggerId: this.taggerId });
+          break; // only one transfer per tick
         }
       }
+    }
+    // Unblock pairs that are no longer in contact
+    for (const key of Array.from(this.blockedContactPairs)) {
+      if (!inRangePairs.has(key)) this.blockedContactPairs.delete(key);
     }
   }
 
@@ -315,6 +361,8 @@ class GameRoom {
         vx: p.vx,
         vy: p.vy,
         lastProcessedInputSeq: p.lastProcessedInputSeq,
+  color: p.color,
+  grounded: p.isGrounded,
       })),
       taggerId: this.taggerId,
       platforms: PLATFORMS,
@@ -397,4 +445,5 @@ setInterval(() => {
 }, 1000 / TICK_RATE);
 
 const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => console.log('Server listening on :' + PORT + ' (rooms: ' + rooms.size + ')'));
+const HOST = '0.0.0.0';
+httpServer.listen(PORT, HOST, () => console.log('Server listening on ' + HOST + ':' + PORT + ' (rooms: ' + rooms.size + ')'));

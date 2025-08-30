@@ -1,8 +1,12 @@
 import '/socket.io/socket.io.js';
+import { SceneDecorator, ensureCtxRoundRectSupport } from './render.js';
 const socket = io();
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+ensureCtxRoundRectSupport();
+const scene = new SceneDecorator(canvas);
+let lastBgTime = null; // background animation timestamp
 
 // UI elements
 elem('createBtn').onclick = () => {
@@ -45,6 +49,23 @@ const PLAYER_RADIUS = PLAYER_HEIGHT/2;
 
 const localPlayer = { id:null, x:0,y:0,vx:0,vy:0,dir:1,isTagger:false,isGrounded:false,jumpHeld:false,canVariable:false,jumpStart:0, lastGroundedTime:0, bufferedJumpTime:0 };
 let predictionActive = false; // remain false until user moves / jumps to avoid idle flicker
+const dustParticles = [];
+// Subtler dust: fewer, smaller, shorter-lived, soft alpha.
+function spawnDust(x,y,color){
+  const count = 2; // was 4
+  for (let i=0;i<count;i++) {
+    dustParticles.push({
+      x: x + (Math.random()*8-4),
+      y: y + (Math.random()*4-2),
+      vx: (Math.random()*30-15),
+      vy: (Math.random()*40+25),
+      life: 260 + Math.random()*80, // shorter life
+      t: 0,
+      c: color,
+      r: 4 + Math.random()*3
+    });
+  }
+}
 
 // Mirror advanced jump tuning (keep in sync with server where possible)
 const JUMP_SUSTAIN_MS = 140;
@@ -90,7 +111,7 @@ socket.on('state', s => {
     while (arr.length > MAX_HISTORY) arr.shift();
   }
 });
-socket.on('tag', ({ taggerId }) => { gameState.taggerId = taggerId; flashTag(); });
+socket.on('tag', ({ taggerId }) => { gameState.taggerId = taggerId; /* popup removed */ });
 socket.on('playerLeft', () => {});
 
 function showStatus(code) {
@@ -100,15 +121,7 @@ function showStatus(code) {
   elem('playerList').classList.remove('hidden');
 }
 
-function flashTag() {
-  const el = document.createElement('div');
-  el.className = 'overlay';
-  el.style.fontSize = '72px';
-  el.style.color = '#ff9800';
-  el.textContent = 'TAG!';
-  document.body.appendChild(el);
-  setTimeout(()=>el.remove(), 600);
-}
+// flashTag removed (arrow indicator now serves as tag visibility cue)
 
 // Input
 const keys = {};
@@ -173,7 +186,11 @@ let lastPredictTime = null;
 function draw() {
   requestAnimationFrame(draw);
   const { players, platforms, state, countdownRemainingMs, gameRemainingMs, taggerId } = gameState;
-  ctx.clearRect(0,0,canvas.width, canvas.height);
+  const now = performance.now();
+  const dtBg = lastBgTime? (now - lastBgTime)/1000 : 0;
+  lastBgTime = now;
+  scene.update(dtBg);
+  scene.drawBackground();
 
   // Lightweight local horizontal prediction (no vertical) for responsiveness
   if (localPlayer.id && predictionActive) {
@@ -186,7 +203,10 @@ function draw() {
   }
 
   // simple sky gradient already background via CSS; draw platforms
-  for (const p of platforms) { ctx.fillStyle = '#4caf50'; ctx.fillRect(p.x, canvas.height - (p.y + p.h), p.w, p.h); }
+  scene.drawPlatforms(platforms);
+
+  // Draw dust between platforms and players so it appears behind characters but above platforms
+  drawDust();
 
   // players
   // Interpolated remote players & predicted local
@@ -213,10 +233,18 @@ function draw() {
     if (p.id === localId) continue;
     const rp = rendered.get(p.id);
     if (!rp) continue;
-    drawPlayer(rp.x, rp.y, p.id === taggerId, rp.name, false);
+    scene.drawPlayer({ x: rp.x, y: rp.y, name: rp.name, isTagger: p.id===taggerId, dir: p.dir||1, vx: p.vx||0, vy: p.vy||0, color: p.color }, { x:0,y:0 }, false, p.id===taggerId);
   }
-  // Draw local predicted player last for clarity
-  if (localPlayer.id) drawPlayer(localPlayer.x, localPlayer.y, localPlayer.isTagger, players.find(p=>p.id===localId)?.name||'You', true);
+  if (localPlayer.id) {
+    const lpServer = players.find(p=>p.id===localId);
+    const color = lpServer?.color;
+    scene.drawPlayer({ x: localPlayer.x, y: localPlayer.y, name: lpServer?.name||'You', isTagger: localPlayer.isTagger, dir: localPlayer.dir, vx: localPlayer.vx, vy: localPlayer.vy, color }, { x:0,y:0 }, true, localPlayer.isTagger);
+    // Dust when running on ground (spawn at/just below feet)
+    if (lpServer?.grounded && Math.abs(localPlayer.vx) > 40) {
+      if (Math.random()<0.25) spawnDust(localPlayer.x, localPlayer.y - 4, color||'#bbb');
+    }
+  }
+
 
   // UI overlays
   if (state === 'countdown') {
@@ -244,18 +272,7 @@ function draw() {
 
 draw();
 
-function drawPlayer(x, y, isTagger, name, isSelf) {
-  const size = 36;
-  ctx.fillStyle = isTagger ? '#ff3d00' : (isSelf ? '#2196f3' : '#ffffff');
-  ctx.beginPath();
-  ctx.arc(x, canvas.height - (y + size/2), size/2, 0, Math.PI*2);
-  ctx.fill();
-  ctx.fillStyle = '#000';
-  ctx.font = '14px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText(name, x, canvas.height - (y + size + 12));
-  if (isTagger) { ctx.fillStyle='#ffeb3b'; ctx.fillText('IT', x, canvas.height - (y - 10)); }
-}
+// Basic circle player renderer removed in favor of animated SceneDecorator version.
 
 function updateLocalPrediction(dt, platforms) {
   // Horizontal
@@ -352,6 +369,24 @@ function updateLocalPrediction(dt, platforms) {
   // Reset one-shot jump detection flags locally AFTER using them
   justPressedJump = false;
   justReleasedJump = false; // we could use for variable logic; currently only early release uses jumpHeld check
+}
+
+function drawDust(){
+  for (let i=dustParticles.length-1;i>=0;i--){
+    const p = dustParticles[i];
+    p.t += 16; // fixed timestep approximation
+    const age = p.t / p.life;
+    p.x += p.vx * 0.016;
+    p.y += p.vy * 0.016;
+    if (age>=1){ dustParticles.splice(i,1); continue; }
+    const alpha = (1-age) * 0.35; // dimmer overall
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = p.c || '#bbb';
+    ctx.beginPath();
+    ctx.arc(p.x, canvas.height - p.y, p.r * (1-age*0.6), 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
 }
 
 // Start game button (leader only)
