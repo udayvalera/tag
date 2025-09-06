@@ -188,6 +188,11 @@ input.code {
   text-shadow: 2px 2px 0 #000;
 }
 
+/* Latency indicator color states */
+#latency.good, .pingValue.good { color: #2ecc71; }
+#latency.ok, .pingValue.ok { color: #f1c40f; }
+#latency.bad, .pingValue.bad { color: #e74c3c; }
+
 /* Overlays */
 .overlay { 
   position: absolute; 

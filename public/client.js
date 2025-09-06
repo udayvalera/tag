@@ -3,6 +3,46 @@ import { SceneDecorator, ensureCtxRoundRectSupport } from './render.js';
 
 const socket = io();
 
+// --- Latency / Ping Measurement ---
+let lastPingSentAt = 0;
+const pingSamples = [];
+const MAX_PING_SAMPLES = 20;
+const PING_INTERVAL_MS = 1000; // send ping every second
+let displayedPing = null;
+
+function sendLatencyPing() {
+  lastPingSentAt = performance.now();
+  socket.emit('latencyPing', { t: lastPingSentAt });
+}
+
+socket.on('latencyPong', ({ t }) => {
+  const now = performance.now();
+  const rtt = now - t; // client timestamp echoed back
+  pingSamples.push(rtt);
+  while (pingSamples.length > MAX_PING_SAMPLES) pingSamples.shift();
+  const avg = pingSamples.reduce((a,b)=>a+b,0)/pingSamples.length;
+  displayedPing = Math.round(avg);
+  updateLatencyDisplay();
+});
+
+function updateLatencyDisplay() {
+  const fpsEl = document.getElementById('fpsLatency');
+  if (!fpsEl) return;
+  const pingStr = displayedPing == null ? '--' : displayedPing;
+  let cls = '';
+  if (displayedPing != null) {
+    if (displayedPing < 70) cls = 'good';
+    else if (displayedPing < 140) cls = 'ok';
+    else cls = 'bad';
+  }
+  const fpsText = fpsEl.dataset.fpsText || 'FPS: --';
+  fpsEl.innerHTML = `${fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`;
+}
+
+setInterval(() => {
+  if (socket.connected) sendLatencyPing();
+}, PING_INTERVAL_MS);
+
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 ensureCtxRoundRectSupport();
@@ -749,8 +789,10 @@ window.addEventListener('blur', () => {
 let frameCount = 0;
 let lastFPSUpdate = performance.now();
 const fpsElement = document.createElement('div');
-// Moved to top-right corner (opposite side of room code / status info)
-fpsElement.style.cssText = 'position:fixed;top:10px;right:10px;color:#fff;font-size:12px;z-index:1000;pointer-events:none;';
+fpsElement.id = 'fpsLatency';
+fpsElement.style.cssText = 'position:fixed;top:10px;right:10px;color:#fff;font-size:12px;z-index:1000;pointer-events:none;text-shadow:1px 1px 0 #000;font-family:monospace;';
+fpsElement.dataset.fpsText = 'FPS: --';
+fpsElement.innerHTML = 'FPS: -- | PING: <span class="pingValue">-- ms</span>';
 document.body.appendChild(fpsElement);
 
 setInterval(() => {
@@ -758,7 +800,18 @@ setInterval(() => {
   frameCount++;
   if (now - lastFPSUpdate >= 1000) {
     const fps = Math.round((frameCount * 1000) / (now - lastFPSUpdate));
-    fpsElement.textContent = `FPS: ${fps}`;
+    fpsElement.dataset.fpsText = `FPS: ${fps}`;
+    // refresh combined display preserving current ping
+    const pingSpan = fpsElement.querySelector('.pingValue');
+    const currentPing = pingSpan ? pingSpan.textContent.replace(/[^0-9-]/g,'') : (displayedPing==null?'--':displayedPing);
+    const pingStr = displayedPing == null ? currentPing : displayedPing;
+    let cls = '';
+    if (displayedPing != null) {
+      if (displayedPing < 70) cls = 'good';
+      else if (displayedPing < 140) cls = 'ok';
+      else cls = 'bad';
+    }
+    fpsElement.innerHTML = `${fpsElement.dataset.fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`;
     frameCount = 0;
     lastFPSUpdate = now;
   }

@@ -432,6 +432,12 @@ io.on('connection', socket => {
       }
     }
   });
+
+  // Lightweight latency echo (client sends timestamp, we immediately echo it back)
+  socket.on('latencyPing', ({ t }) => {
+    // Echo back the original client timestamp so client can compute RTT precisely
+    socket.emit('latencyPong', { t });
+  });
 });
 
 // main game loop
