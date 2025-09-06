@@ -6,23 +6,32 @@ export class SceneDecorator {
     this.pixelsPerUnit = 1; // For pixel art scaling
     this.timeStart = performance.now();
     this.initBackground();
-    this.initParallax();
-    this.initParticles();
-    this.initWeather();
+  // Simplified background: only clouds + birds
+  this.initClouds();
+  this.initBirds();
+  }
+
+  // Utility to validate numeric inputs (avoid NaN / Infinity in canvas API)
+  isFiniteNumber(v) { return typeof v === 'number' && isFinite(v); }
+
+  safeCreateRadialGradient(ctx, x0, y0, r0, x1, y1, r1) {
+    if (![x0,y0,r0,x1,y1,r1].every(this.isFiniteNumber)) return null;
+    if (r0 < 0 || r1 < 0) return null;
+    try {
+      return ctx.createRadialGradient(x0, y0, r0, x1, y1, r1);
+    } catch (e) {
+      console.warn('safeCreateRadialGradient skipped invalid params', {x0,y0,r0,x1,y1,r1});
+      return null;
+    }
   }
 
   initBackground() {
-    // Create pixelated sky gradient
-    const ctx = this.ctx;
-    const g = ctx.createLinearGradient(0, 0, 0, this.canvas.height);
-    g.addColorStop(0, '#74b9ff');
-    g.addColorStop(0.3, '#0984e3');
-    g.addColorStop(0.6, '#6c5ce7');
-    g.addColorStop(1, '#a29bfe');
-    this.skyGradient = g;
-    
-    // Pixel grid pattern for subtle texture
-    this.pixelPattern = this.createPixelPattern();
+  // Light blue peaceful sky gradient
+  const ctx = this.ctx;
+  const g = ctx.createLinearGradient(0, 0, 0, this.canvas.height);
+  g.addColorStop(0, '#bdeaff');
+  g.addColorStop(1, '#e6f9ff');
+  this.skyGradient = g;
   }
 
   createPixelPattern() {
@@ -43,45 +52,35 @@ export class SceneDecorator {
     return this.ctx.createPattern(patternCanvas, 'repeat');
   }
 
-  initParallax() {
-    // Multiple parallax layers
-    this.parallaxLayers = [
-      // Distant mountains
-      {
-        type: 'mountains',
-        elements: Array.from({length: 3}, (_, i) => ({
-          x: i * 400 + Math.random() * 100,
-          y: 200 + Math.random() * 50,
-          width: 300 + Math.random() * 200,
-          height: 150 + Math.random() * 100,
-          speed: 0.1,
-          color: ['#2d3436', '#636e72', '#b2bec3'][Math.floor(Math.random() * 3)]
-        }))
-      },
-      // Midground hills
-      {
-        type: 'hills',
-        elements: Array.from({length: 4}, (_, i) => ({
-          x: i * 300 + Math.random() * 150,
-          y: 100 + Math.random() * 50,
-          width: 200 + Math.random() * 150,
-          height: 80 + Math.random() * 60,
-          speed: 0.3,
-          color: ['#00b894', '#00cec9', '#55a3ff'][Math.floor(Math.random() * 3)]
-        }))
-      },
-      // Foreground trees
-      {
-        type: 'trees',
-        elements: Array.from({length: 6}, (_, i) => ({
-          x: i * 250 + Math.random() * 200,
-          y: 50 + Math.random() * 30,
-          height: 60 + Math.random() * 40,
-          speed: 0.8,
-          type: Math.random() > 0.5 ? 'pine' : 'round'
-        }))
-      }
-    ];
+  // Parallax removed (kept empty to avoid downstream errors)
+  initParallax() { this.parallaxLayers = []; }
+
+  initClouds() { this.clouds = Array.from({ length: 10 }, () => this.spawnCloud()); }
+
+  spawnCloud() {
+    return {
+      x: Math.random() * this.canvas.width,
+      y: 50 + Math.random() * 160,
+      speed: 8 + Math.random() * 16,
+      scale: 0.5 + Math.random() * 1.0,
+      puffSeed: Math.random(),
+      tint: 0
+    };
+  }
+
+  initBirds() {
+    this.birds = Array.from({ length: 6 }, () => this.spawnBird());
+  }
+
+  spawnBird() {
+    return {
+      x: Math.random() * this.canvas.width,
+      y: 80 + Math.random() * 180,
+      speed: 40 + Math.random() * 40,
+      flap: Math.random() * Math.PI * 2,
+      scale: 0.8 + Math.random() * 0.6,
+      dir: Math.random() > 0.5 ? 1 : -1
+    };
   }
 
   initParticles() {
@@ -99,25 +98,29 @@ export class SceneDecorator {
 
   update(dt) {
     const t = (performance.now() - this.timeStart) / 1000;
-    
-    // Update parallax
-    for (const layer of this.parallaxLayers) {
-      for (const element of layer.elements) {
-        element.x += element.speed * dt * 20;
-        if (element.x > this.canvas.width + 100) {
-          element.x = -element.width - 100;
-        }
+    this.updateClouds(dt);
+    this.updateBirds(dt);
+    this.bobOffset = Math.sin(t * 2) * 2; // retained for player bobbing
+  }
+
+  updateClouds(dt) {
+    for (const c of this.clouds) {
+      c.x += c.speed * dt;
+      if (c.x - 150 * c.scale > this.canvas.width) {
+        // recycle
+        Object.assign(c, this.spawnCloud(), { x: -200 });
       }
     }
+  }
 
-    // Update particles
-    this.updateSparkles(dt);
-    this.updateFloatingLeaves(dt);
-    this.updateDustMotes(dt);
-    this.updateWeather(dt, t);
-
-    // Animate background elements
-    this.bobOffset = Math.sin(t * 2) * 2;
+  updateBirds(dt) {
+    for (const b of this.birds) {
+      b.x += b.speed * dt * b.dir;
+      b.flap += dt * 6;
+      if (b.x < -50 || b.x > this.canvas.width + 50) {
+        Object.assign(b, this.spawnBird(), { x: b.dir === 1 ? -60 : this.canvas.width + 60, dir: b.dir });
+      }
+    }
   }
 
   updateSparkles(dt) {
@@ -242,136 +245,60 @@ export class SceneDecorator {
   drawBackground() {
     const ctx = this.ctx;
     const t = (performance.now() - this.timeStart) / 1000;
-    
-    // Sky with dynamic gradient based on time
-    const timeOfDay = (t / 60) % 24;
-    let gradientStops = [
-      { pos: 0, color: '#74b9ff' },
-      { pos: 0.3, color: '#0984e3' },
-      { pos: 0.6, color: '#6c5ce7' },
-      { pos: 1, color: '#a29bfe' }
-    ];
-
-    // Sunrise/sunset effect
-    if (timeOfDay < 6 || timeOfDay > 18) {
-      gradientStops = [
-        { pos: 0, color: '#2d3436' },
-        { pos: 0.4, color: '#636e72' },
-        { pos: 0.7, color: '#fdcb6e' },
-        { pos: 1, color: '#e17055' }
-      ];
-    }
-
-    const g = ctx.createLinearGradient(0, 0, 0, this.canvas.height);
-    gradientStops.forEach(stop => g.addColorStop(stop.pos, stop.color));
-    
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-
-    // Lightning flash effect
-    if (this.lightningActive) {
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
-      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    }
-
-    // Subtle pixel pattern overlay
-    if (this.pixelPattern) {
-      ctx.fillStyle = this.pixelPattern;
-      ctx.globalAlpha = 0.05;
-      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-      ctx.globalAlpha = 1;
-    }
-
-    // Draw parallax layers
-    this.drawParallaxLayers();
-
-    // Draw animated sun/moon
-    this.drawCelestialBody(t);
-
-    // Draw particles
-    this.drawSparkles();
-    this.drawFloatingLeaves();
-    this.drawDustMotes();
-    this.drawRain();
-
-    // Add subtle vignette
-    this.drawVignette();
+  // Static simple sky
+  ctx.fillStyle = this.skyGradient || '#cfeeff';
+  ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+  // Clouds
+  this.drawClouds();
+  // Birds
+  this.drawBirds();
   }
 
-  drawParallaxLayers() {
+  drawClouds() {
     const ctx = this.ctx;
-    
-    // Draw mountains
-    for (const mountain of this.parallaxLayers[0].elements) {
-      ctx.fillStyle = mountain.color;
-      ctx.fillRect(mountain.x, this.canvas.height - mountain.y, mountain.width, mountain.height);
-      
-      // Add snow caps
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(mountain.x + 20, this.canvas.height - mountain.y - 20, mountain.width - 40, 20);
+    ctx.save();
+    for (const c of this.clouds) {
+      const baseX = c.x;
+      const baseY = c.y;
+      const puffCount = 5 + Math.floor(c.scale * 4);
+      for (let i = 0; i < puffCount; i++) {
+        const offX = (i - puffCount / 2) * 30 * c.scale + Math.sin((i + c.puffSeed) * 2) * 8;
+        const offY = Math.sin((i + c.puffSeed) * 1.4) * 6 * c.scale;
+        const r = 38 * c.scale * (0.7 + Math.random() * 0.3);
+        const g = this.safeCreateRadialGradient(ctx, baseX + offX, baseY + offY, r * 0.2, baseX + offX, baseY + offY, r);
+        if (g) {
+          g.addColorStop(0, `rgba(255,255,255,0.95)`);
+          g.addColorStop(1, `rgba(255,255,255,0)`);
+          ctx.fillStyle = g;
+        } else {
+          ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        }
+        ctx.beginPath();
+        ctx.arc(baseX + offX, baseY + offY, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
+    ctx.restore();
+  }
 
-    // Draw hills with grass texture
-    for (const hill of this.parallaxLayers[1].elements) {
-      // Hill shape
-      ctx.fillStyle = hill.color;
+  drawParallaxLayers() { /* intentionally empty (removed) */ }
+
+  drawBirds() {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    for (const b of this.birds) {
+      const flap = Math.sin(b.flap) * 4 * b.scale;
+      ctx.strokeStyle = 'rgba(70,90,110,0.8)';
       ctx.beginPath();
-      ctx.moveTo(hill.x, this.canvas.height - hill.y + hill.height);
-      ctx.lineTo(hill.x + hill.width / 2, this.canvas.height - hill.y);
-      ctx.lineTo(hill.x + hill.width, this.canvas.height - hill.y + hill.height);
-      ctx.closePath();
-      ctx.fill();
-
-      // Grass details
-      ctx.strokeStyle = '#27ae60';
-      ctx.lineWidth = 2;
-      for (let i = 0; i < hill.width; i += 8) {
-        ctx.beginPath();
-        ctx.moveTo(hill.x + i, this.canvas.height - hill.y + hill.height);
-        ctx.lineTo(hill.x + i + 3, this.canvas.height - hill.y + hill.height - 8);
-        ctx.stroke();
-      }
+      const wingSpan = 14 * b.scale;
+      ctx.moveTo(b.x - wingSpan * b.dir, b.y);
+      ctx.lineTo(b.x, b.y - flap - 2);
+      ctx.lineTo(b.x + wingSpan * b.dir, b.y);
+      ctx.stroke();
     }
-
-    // Draw trees
-    for (const tree of this.parallaxLayers[2].elements) {
-      const treeX = tree.x;
-      const treeY = this.canvas.height - tree.y;
-      
-      // Tree trunk
-      ctx.fillStyle = '#8b4513';
-      ctx.fillRect(treeX - 4, treeY, 8, 20);
-      
-      // Tree foliage
-      ctx.fillStyle = tree.type === 'pine' ? '#228b22' : '#32cd32';
-      if (tree.type === 'pine') {
-        // Pine tree triangles
-        ctx.beginPath();
-        ctx.moveTo(treeX, treeY - 10);
-        ctx.lineTo(treeX - 15, treeY + 10);
-        ctx.lineTo(treeX + 15, treeY + 10);
-        ctx.closePath();
-        ctx.fill();
-        
-        ctx.beginPath();
-        ctx.moveTo(treeX, treeY - 20);
-        ctx.lineTo(treeX - 12, treeY);
-        ctx.lineTo(treeX + 12, treeY);
-        ctx.closePath();
-        ctx.fill();
-      } else {
-        // Round tree
-        ctx.beginPath();
-        ctx.arc(treeX, treeY - 15, 15, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(treeX - 8, treeY - 5, 12, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(treeX + 8, treeY - 5, 12, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    }
+    ctx.restore();
   }
 
   drawCelestialBody(t) {

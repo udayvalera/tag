@@ -46,12 +46,27 @@ setInterval(() => {
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 ensureCtxRoundRectSupport();
-const scene = new SceneDecorator(canvas);
+let scene = new SceneDecorator(canvas);
 let lastBgTime = null; // background animation timestamp
 
 // Enhanced visual constants
 const ENHANCED_PARTICLES = true;
 const SHOW_DEBUG_PLATFORMS = false; // Set to true for platform debugging
+let SHOW_DEBUG_OVERLAY = false; // Toggle with F2
+
+// Debug overlay element
+const __debugDiv = document.createElement('div');
+__debugDiv.id = 'debugOverlay';
+__debugDiv.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:1500;font:10px monospace;background:rgba(0,0,0,0.6);color:#0f0;padding:6px 8px;max-width:340px;white-space:pre;line-height:1.25;pointer-events:none;';
+__debugDiv.classList.add('hidden');
+document.body.appendChild(__debugDiv);
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'F2') {
+    SHOW_DEBUG_OVERLAY = !SHOW_DEBUG_OVERLAY;
+    __debugDiv.classList.toggle('hidden', !SHOW_DEBUG_OVERLAY);
+  }
+});
 
 // UI elements
 elem('createBtn').onclick = () => {
@@ -209,6 +224,15 @@ socket.on('connect', () => { localId = socket.id; });
 
 socket.on('state', s => {
   gameState = s;
+  if (!window.__firstStateLogged) {
+    console.log('[DEBUG:first-state]', {
+      players: s.players.map(p => ({ id: p.id, x: p.x, y: p.y, grounded: p.grounded, tagger: p.isTagger })),
+      platforms: s.platforms?.length,
+      state: s.state,
+      serverTime: s.serverTime
+    });
+    window.__firstStateLogged = true;
+  }
   updatePlayerList(); 
   updateStartButton();
   
@@ -400,7 +424,20 @@ function draw() {
   }
   
   // Draw platforms
-  scene.drawPlatforms(platforms);
+  if (Array.isArray(platforms) && platforms.length) {
+    try {
+      scene.drawPlatforms(platforms);
+    } catch (err) {
+      console.error('drawPlatforms error', err);
+    }
+  } else {
+    // Fallback visual if no platforms present
+    ctx.fillStyle = 'rgba(255,0,0,0.25)';
+    ctx.fillRect(0, canvas.height - 50, canvas.width, 10);
+    ctx.fillStyle = '#f00';
+    ctx.font = '12px monospace';
+    ctx.fillText('NO PLATFORMS RECEIVED', 20, 40);
+  }
 
   // Draw enhanced dust system
   drawDust();
@@ -553,9 +590,12 @@ function draw() {
     const cd = Math.ceil(countdownRemainingMs / 1000);
     elem('countdown').classList.remove('hidden');
     const taggerName = players.find(p => p.id === taggerId)?.name || '';
-    elem('countdown-number').textContent = cd;
-    elem('.countdown-text').textContent = 'GET READY!';
-    elem('.countdown-tagger').innerHTML = `Tagger: <span class="tagger-name">${taggerName}</span>`;
+  const cdNum = elem('countdown-number');
+  const cdText = elem('countdown-text');
+  const cdTagger = elem('countdown-tagger');
+  if (cdNum) cdNum.textContent = cd;
+  if (cdText) cdText.textContent = 'GET READY!';
+  if (cdTagger) cdTagger.innerHTML = `Tagger: <span class="tagger-name">${taggerName}</span>`;
   } else {
     elem('countdown').classList.add('hidden');
   }
@@ -585,6 +625,21 @@ function draw() {
       ).join('');
       elem('results').dataset.filled = '1';
     }
+  }
+
+  // Debug overlay update
+  if (SHOW_DEBUG_OVERLAY) {
+    const lp = gameState.players.find(p => p.id === localId);
+    __debugDiv.textContent = [
+      `STATE: ${state}`,
+      `PLAYERS: ${gameState.players.length} (rendered remotes: ${[...remoteHistory.keys()].length})`,
+      `PLATFORMS: ${gameState.platforms?.length ?? 0}`,
+      lp ? `LOCAL AUTH x:${lp.x.toFixed(1)} y:${lp.y.toFixed(1)} vy:${(lp.vy||0).toFixed(1)} g:${lp.grounded}` : 'LOCAL AUTH: none',
+      localPlayer.id ? `LOCAL PRED x:${localPlayer.x.toFixed(1)} y:${localPlayer.y.toFixed(1)} g:${localPlayer.isGrounded}` : 'LOCAL PRED: none',
+      `TAGGER: ${gameState.taggerId || 'none'}`,
+      `PING: ${displayedPing ?? '--'} ms`,
+      'F2 toggle debug'
+    ].join('\n');
   }
 }
 
