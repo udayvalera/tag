@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Game Character</title>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Press Start 2P', cursive;
+            background-color: #1a1a1a;
+            color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            image-rendering: pixelated;
+        }
+        canvas {
+            background-color: #87CEEB;
+            border: 4px solid #555;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        .controls {
+            margin-top: 20px;
+            background-color: #2a2a2a;
+            padding: 20px;
+            border-radius: 8px;
+            border: 2px solid #555;
+        }
+        .control-btn {
+            background-color: #444;
+            border: 2px solid #666;
+            color: white;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 5px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .control-btn:active {
+            background-color: #555;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col items-center justify-center min-h-screen p-4">
+
+    <h1 class="text-4xl mb-4">Pixel Jumper</h1>
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+
+    <div class="controls text-center mt-6 p-4 bg-gray-800 rounded-lg border-2 border-gray-700">
+        <p class="text-lg mb-2">Controls</p>
+        <p class="text-sm text-gray-400">Use 'A'/'D' or Left/Right arrows to move. Use 'W' or Up arrow to jump.</p>
+        <div class="flex justify-center mt-4 md:hidden">
+            <button id="leftBtn" class="control-btn">LEFT</button>
+            <button id="rightBtn" class="control-btn">RIGHT</button>
+            <button id="jumpBtn" class="control-btn">JUMP</button>
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = false;
+
+        // Player properties
+        const spriteWidth = 16;
+        const spriteHeight = 16;
+        let gameFrame = 0;
+        const staggerFrames = 10;
+
+        const player = {
+            x: 50,
+            y: 100, // Start on first platform
+            width: spriteWidth * 2,
+            height: spriteHeight * 2,
+            speed: 5,
+            velocityX: 0,
+            velocityY: 0,
+            jumping: false,
+            grounded: true,
+            facingRight: true
+        };
+
+        const keys = {
+            right: false,
+            left: false,
+            up: false,
+        };
+
+        const gravity = 0.8;
+        const jumpPower = -16;
+
+        // Animation states
+        let currentAnimation = 'idle';
+        let animationFrame = 0;
+
+        // Define animation frames
+        const animations = {
+            idle: [
+                // Frame 1: Basic standing pose
+                { body: {x: 4, y: 2, w: 8, h: 8}, eyes: {x: 6, y: 4, w: 1, h: 1}, legs: {x: 5, y: 10, w: 2, h: 2} },
+                // Frame 2: Slight bounce
+                { body: {x: 4, y: 1, w: 8, h: 8}, eyes: {x: 6, y: 4, w: 1, h: 1}, legs: {x: 5, y: 11, w: 2, h: 2} }
+            ],
+            run: [
+                // Frame 1: Running pose 1
+                { body: {x: 4, y: 2, w: 8, h: 8}, eyes: {x: 6, y: 4, w: 1, h: 1}, legs: {x: 4, y: 10, w: 2, h: 2} },
+                // Frame 2: Running pose 2
+                { body: {x: 4, y: 2, w: 8, h: 8}, eyes: {x: 6, y: 4, w: 1, h: 1}, legs: {x: 6, y: 10, w: 2, h: 2} }
+            ],
+            jump: [
+                // Single frame for jumping
+                { body: {x: 4, y: 3, w: 8, h: 8}, eyes: {x: 6, y: 4, w: 1, h: 1}, legs: {x: 5, y: 11, w: 2, h: 2} }
+            ]
+        };
+
+        // Platforms - like Mario levels
+        const platforms = [
+            // Ground level
+            { x: 0, y: canvas.height - 50, width: canvas.width, height: 50, color: '#8B4513' },
+            
+            // First platform level
+            { x: 150, y: 300, width: 120, height: 20, color: '#8B4513' },
+            { x: 400, y: 300, width: 100, height: 20, color: '#8B4513' },
+            { x: 650, y: 300, width: 150, height: 20, color: '#8B4513' },
+            
+            // Second platform level
+            { x: 100, y: 220, width: 80, height: 20, color: '#8B4513' },
+            { x: 300, y: 220, width: 100, height: 20, color: '#8B4513' },
+            { x: 550, y: 220, width: 80, height: 20, color: '#8B4513' },
+            
+            // Third platform level
+            { x: 200, y: 140, width: 120, height: 20, color: '#8B4513' },
+            { x: 500, y: 140, width: 120, height: 20, color: '#8B4513' },
+            
+            // Top platform
+            { x: 350, y: 60, width: 100, height: 20, color: '#8B4513' },
+            
+            // Floating small platforms
+            { x: 600, y: 80, width: 60, height: 15, color: '#A0522D' },
+            { x: 50, y: 180, width: 60, height: 15, color: '#A0522D' },
+            { x: 700, y: 200, width: 60, height: 15, color: '#A0522D' }
+        ];
+
+        // Clouds for decoration
+        const clouds = [
+            { x: 100, y: 50, size: 40, speed: 0.5 },
+            { x: 300, y: 80, size: 30, speed: 0.3 },
+            { x: 500, y: 60, size: 35, speed: 0.4 },
+            { x: 700, y: 40, size: 25, speed: 0.6 }
+        ];
+
+        function drawSkyBackground() {
+            // Create sky gradient (light blue to deeper blue)
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#87CEEB');    // Sky blue
+            gradient.addColorStop(0.5, '#98D8E8');  // Lighter blue
+            gradient.addColorStop(1, '#B0E0E6');    // Even lighter blue
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        function drawClouds() {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            
+            clouds.forEach(cloud => {
+                // Update cloud position (gentle floating)
+                cloud.x += cloud.speed;
+                if (cloud.x > canvas.width + cloud.size) {
+                    cloud.x = -cloud.size;
+                }
+                
+                // Draw cloud (simple rounded rectangles)
+                ctx.beginPath();
+                ctx.arc(cloud.x, cloud.y, cloud.size * 0.3, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.3, cloud.y, cloud.size * 0.4, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.6, cloud.y, cloud.size * 0.3, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.3, cloud.y - cloud.size * 0.2, cloud.size * 0.3, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Add some depth with shadow
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.beginPath();
+                ctx.arc(cloud.x + 2, cloud.y + 2, cloud.size * 0.3, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.3 + 2, cloud.y + 2, cloud.size * 0.4, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.6 + 2, cloud.y + 2, cloud.size * 0.3, 0, Math.PI * 2);
+                ctx.arc(cloud.x + cloud.size * 0.3 + 2, cloud.y - cloud.size * 0.2 + 2, cloud.size * 0.3, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)'; // Reset
+        }
+
+        function drawPlatforms() {
+            platforms.forEach(platform => {
+                // Draw platform base
+                ctx.fillStyle = platform.color;
+                ctx.fillRect(platform.x, platform.y, platform.width, platform.height);
+                
+                // Draw platform border (darker brown)
+                ctx.strokeStyle = '#654321';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(platform.x, platform.y, platform.width, platform.height);
+                
+                // Draw platform pattern (like bricks)
+                ctx.fillStyle = '#A0522D';
+                for (let i = 0; i < platform.width; i += 20) {
+                    for (let j = 0; j < platform.height; j += 10) {
+                        if ((i / 20 + j / 10) % 2 === 0) {
+                            ctx.fillRect(platform.x + i, platform.y + j, 10, 5);
+                        }
+                    }
+                }
+                
+                // Add some grass/dirt texture on top platforms
+                if (platform.height === 20) {
+                    ctx.fillStyle = '#228B22'; // Green grass
+                    ctx.fillRect(platform.x, platform.y - 2, platform.width, 2);
+                    
+                    // Grass tufts
+                    ctx.fillStyle = '#32CD32';
+                    for (let i = 0; i < platform.width; i += 15) {
+                        ctx.fillRect(platform.x + i + Math.random() * 5, platform.y - 4, 2, 4);
+                    }
+                }
+            });
+        }
+
+        function checkPlatformCollision(rect1, rect2) {
+            return rect1.x < rect2.x + rect2.width &&
+                   rect1.x + rect1.width > rect2.x &&
+                   rect1.y < rect2.y + rect2.height &&
+                   rect1.y + rect1.height > rect2.y;
+        }
+
+        function drawPixelCharacter(x, y, frameData, scale = 2, flip = false) {
+            const scaledWidth = spriteWidth * scale;
+            const scaledHeight = spriteHeight * scale;
+            
+            // Save context for flipping
+            ctx.save();
+            if (flip) {
+                ctx.scale(-1, 1);
+                x = -x - scaledWidth;
+            }
+
+            // Draw body (blue square)
+            ctx.fillStyle = '#4A90E2'; // Blue color
+            ctx.fillRect(x + frameData.body.x * scale, y + frameData.body.y * scale, 
+                        frameData.body.w * scale, frameData.body.h * scale);
+            
+            // Draw outline (black border)
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + frameData.body.x * scale, y + frameData.body.y * scale, 
+                          frameData.body.w * scale, frameData.body.h * scale);
+
+            // Draw eyes (white squares)
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(x + frameData.eyes.x * scale, y + frameData.eyes.y * scale, 
+                        frameData.eyes.w * scale, frameData.eyes.h * scale);
+            ctx.fillRect(x + (frameData.eyes.x + 2) * scale, y + frameData.eyes.y * scale, 
+                        frameData.eyes.w * scale, frameData.eyes.h * scale);
+
+            // Draw legs (black rectangles)
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(x + frameData.legs.x * scale, y + frameData.legs.y * scale, 
+                        frameData.legs.w * scale, frameData.legs.h * scale);
+            
+            // Draw leg outline
+            ctx.strokeStyle = '#333333';
+            ctx.strokeRect(x + frameData.legs.x * scale, y + frameData.legs.y * scale, 
+                          frameData.legs.w * scale, frameData.legs.h * scale);
+
+            ctx.restore();
+        }
+
+        function updatePlayer() {
+            // Store previous position for collision detection
+            const prevX = player.x;
+            const prevY = player.y;
+
+            // Horizontal movement
+            if (keys.right) {
+                player.velocityX = player.speed;
+                player.facingRight = true;
+            } else if (keys.left) {
+                player.velocityX = -player.speed;
+                player.facingRight = false;
+            } else {
+                player.velocityX *= 0.8; // Friction
+                if (Math.abs(player.velocityX) < 0.1) {
+                    player.velocityX = 0;
+                }
+            }
+            
+            player.x += player.velocityX;
+
+            // Apply gravity
+            if (!player.grounded) {
+                player.velocityY += gravity;
+            }
+            player.y += player.velocityY;
+
+            // Platform collision detection
+            player.grounded = false;
+            const playerRect = {
+                x: player.x,
+                y: player.y,
+                width: player.width,
+                height: player.height
+            };
+
+            platforms.forEach(platform => {
+                const platformRect = {
+                    x: platform.x,
+                    y: platform.y,
+                    width: platform.width,
+                    height: platform.height
+                };
+
+                // Check if player is landing on platform from above
+                if (checkPlatformCollision(playerRect, platformRect) && 
+                    prevY + player.height <= platform.y && 
+                    player.y + player.height > platform.y &&
+                    player.velocityY > 0) {
+                    
+                    // Landing on platform
+                    player.y = platform.y - player.height;
+                    player.velocityY = 0;
+                    player.jumping = false;
+                    player.grounded = true;
+                }
+                
+                // Check side collisions
+                if (checkPlatformCollision(playerRect, platformRect)) {
+                    // Left collision
+                    if (player.x < platform.x && prevX + player.width <= platform.x) {
+                        player.x = platform.x - player.width;
+                        player.velocityX = 0;
+                    }
+                    // Right collision
+                    else if (player.x + player.width > platform.x + platform.width && 
+                            prevX >= platform.x + platform.width) {
+                        player.x = platform.x + platform.width;
+                        player.velocityX = 0;
+                    }
+                }
+            });
+            
+            // Ground collision (fallback)
+            if (player.y + player.height > canvas.height - 50) {
+                player.y = canvas.height - 50 - player.height;
+                player.velocityY = 0;
+                player.jumping = false;
+                player.grounded = true;
+            }
+            
+            // World bounds
+            if (player.x < 0) {
+                player.x = 0;
+                player.velocityX = 0;
+            }
+            if (player.x + player.width > canvas.width) {
+                player.x = canvas.width - player.width;
+                player.velocityX = 0;
+            }
+
+            // Prevent falling through ground
+            if (player.y > canvas.height) {
+                player.y = 100; // Reset to first platform
+                player.velocityY = 0;
+            }
+
+            // Update animation
+            updateAnimation();
+        }
+
+        function updateAnimation() {
+            // Determine current animation state
+            if (!player.grounded) {
+                currentAnimation = 'jump';
+            } else if (Math.abs(player.velocityX) > 0.5) {
+                currentAnimation = 'run';
+            } else {
+                currentAnimation = 'idle';
+            }
+
+            // Update frame
+            animationFrame = Math.floor(gameFrame / staggerFrames) % animations[currentAnimation].length;
+            gameFrame++;
+        }
+
+        function drawPlayer() {
+            const frameData = animations[currentAnimation][animationFrame];
+            const flip = !player.facingRight;
+            drawPixelCharacter(player.x, player.y, frameData, 2, flip);
+        }
+
+        function animate() {
+            // Draw background
+            drawSkyBackground();
+            
+            // Draw clouds
+            drawClouds();
+            
+            // Draw platforms
+            drawPlatforms();
+
+            // Update and draw player
+            updatePlayer();
+            drawPlayer();
+
+            requestAnimationFrame(animate);
+        }
+
+        // Keyboard controls
+        window.addEventListener('keydown', (e) => {
+            switch (e.key.toLowerCase()) {
+                case 'arrowright':
+                case 'd':
+                    keys.right = true;
+                    e.preventDefault();
+                    break;
+                case 'arrowleft':
+                case 'a':
+                    keys.left = true;
+                    e.preventDefault();
+                    break;
+                case 'arrowup':
+                case 'w':
+                case ' ':
+                    if (!player.jumping && player.grounded) {
+                        player.velocityY = jumpPower;
+                        player.jumping = true;
+                        player.grounded = false;
+                    }
+                    e.preventDefault();
+                    break;
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            switch (e.key.toLowerCase()) {
+                case 'arrowright':
+                case 'd':
+                    keys.right = false;
+                    break;
+                case 'arrowleft':
+                case 'a':
+                    keys.left = false;
+                    break;
+                case 'arrowup':
+                case 'w':
+                case ' ':
+                    keys.up = false;
+                    break;
+            }
+        });
+
+        // Touch controls for mobile
+        const leftBtn = document.getElementById('leftBtn');
+        const rightBtn = document.getElementById('rightBtn');
+        const jumpBtn = document.getElementById('jumpBtn');
+
+        leftBtn.addEventListener('touchstart', (e) => { 
+            e.preventDefault(); 
+            keys.left = true; 
+        });
+        leftBtn.addEventListener('touchend', (e) => { 
+            e.preventDefault(); 
+            keys.left = false; 
+        });
+        
+        rightBtn.addEventListener('touchstart', (e) => { 
+            e.preventDefault(); 
+            keys.right = true; 
+        });
+        rightBtn.addEventListener('touchend', (e) => { 
+            e.preventDefault(); 
+            keys.right = false; 
+        });
+        
+        jumpBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (!player.jumping && player.grounded) {
+                player.velocityY = jumpPower;
+                player.jumping = true;
+                player.grounded = false;
+            }
+        });
+
+        // Start the game immediately
+        animate();
+    </script>
+
+</body>
+</html>

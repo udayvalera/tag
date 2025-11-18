@@ -6,7 +6,7 @@ Bright, sunny, realtime multiplayer 2D tag game. One player is "It" (the tagger)
 - Create / join room with 6-char code
 - Room leader (creator) explicit Start Game control (no auto start)
 - Player list panel with dynamic badges (LEADER / TAGGER / YOU)
-- Server authoritative physics loop @60Hz, snapshots default ~20Hz (configurable)
+- Server authoritative physics loop @60Hz, snapshots default ~30Hz (configurable)
 - Pre-game 3s countdown freeze showing randomly selected tagger
 - 120s (configurable) match timer
 - Tag transfer on proximity with per-pair cooldown (anti ping-pong spam)
@@ -50,9 +50,9 @@ Edit constants near top of `server.js`:
 - Tag logic: `TAG_COOLDOWN_MS`, `TAGGER_SPEED_MULT`
 - Physics core: `BASE_SPEED`, `JUMP_VELOCITY`, `GRAVITY`, `PLAYER_HEIGHT`
 - Jump tuning: `JUMP_SUSTAIN_MS`, `JUMP_LOW_GRAVITY_FACTOR`, `JUMP_SHORT_HOP_FACTOR`, `COYOTE_MS`, `JUMP_BUFFER_MS`
-- Networking cadence: `TICK_RATE` (simulation), snapshot interval (currently 50ms in `broadcastState` section; can tighten to 33ms for smoother remote motion)
+- Networking cadence: `TICK_RATE` (simulation), snapshot interval (currently ~33ms in `broadcastState` section; can be adjusted for bandwidth vs. smoothness)
 
-Client-side interpolation delay & smoothing live in `public/client.js` (`INTERP_DELAY_MS`, thresholds for reconciliation). Reduce `INTERP_DELAY_MS` (e.g. 110 → 90) for snappier remote response if local network jitter is low.
+Client-side interpolation delay & smoothing live in `public/client.js` (`BASE_INTERP_DELAY_MS`, `MIN_INTERP_DELAY_MS`, reconciliation tiers). Trim `BASE_INTERP_DELAY_MS` (e.g. 80 → 70) for even snappier remote response if local network jitter is low.
 
 To prevent initial flicker, local prediction only activates after first movement / jump input (`predictionActive`).
 
@@ -60,15 +60,15 @@ Platforms are defined in `PLATFORMS` (array of `{x,y,w,h}`) where `y` increases 
 
 ## Networking & Movement Model
 - Server is authoritative: executes full physics + tagging and timestamps snapshots with `serverTime`.
-- Client receives snapshots, interpolates remote players in the past (~110ms) to mask jitter.
-- Local player prediction applies horizontal + advanced vertical physics; soft reconciliation only when error exceeds thresholds (X>6u, Y>12u) to avoid visible snapping.
+- Client receives snapshots, interpolates remote players roughly ~80ms in the past (auto-trimmed toward ping, minimum ≈45ms) to mask jitter.
+- Local player prediction applies horizontal + advanced vertical physics; reconciliation lerps toward authority with tiered gains and only hard-snaps when error grows beyond ~30u horizontal / ~40u vertical.
 - Initial idle period uses full authoritative position (no prediction) until player presses a movement or jump key (eliminates spawn flicker).
 
 ### Adjusting Smoothness
 | Goal | Change |
 |------|--------|
-| Smoother remotes | Increase snapshot rate to 30–40Hz or reduce `INTERP_DELAY_MS` if packets stable |
-| Lower bandwidth | Keep 20Hz but add velocity-based extrapolation (future enhancement) |
+| Smoother remotes | Increase snapshot rate to 30–40Hz or trim `BASE_INTERP_DELAY_MS` / `MIN_INTERP_DELAY_MS` if packets stay stable |
+| Lower bandwidth | Keep 30Hz but add stronger extrapolation or delta compression |
 | Crisper local feel | Lower reconciliation thresholds slightly (e.g. X 4u, Y 8u) |
 | More floaty jump | Lower `GRAVITY` or raise `JUMP_SUSTAIN_MS` |
 | Tighter jump | Raise `GRAVITY` or reduce `JUMP_SUSTAIN_MS` / `JUMP_LOW_GRAVITY_FACTOR` |

@@ -47,6 +47,8 @@ const COLOR_PALETTE = [
 //   { x: 600, y: 560, w: 400, h: 24 }
 // ];
 // Simple platform layout (x, y, width, height). y=0 is ground baseline.
+const SNAPSHOT_INTERVAL_MS = 1000 / 30; // ~33ms → 30Hz snapshots for smoother remote motion
+
 const PLATFORMS = [
   // Ground platform
   { x: 0, y: 0, w: 1600, h: 40 },
@@ -337,8 +339,8 @@ class GameRoom {
     this.updatePhysics(dt);
     this.processTagging();
 
-    // broadcast at 20 Hz to balance bandwidth
-    if (now - this.lastBroadcast > 50) {
+    // broadcast state at ~30 Hz for smoother remote interpolation
+    if (now - this.lastBroadcast >= SNAPSHOT_INTERVAL_MS) {
       this.broadcastState();
       this.lastBroadcast = now;
     }

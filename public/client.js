@@ -105,8 +105,10 @@ let localId = null;
 let inputSeq = 0;
 const pendingInputs = []; // inputs not yet confirmed by server
 const remoteHistory = new Map(); // playerId -> array of snapshots for interpolation
-const INTERP_DELAY_MS = 110; // render this much in past
-const MAX_HISTORY = 30;
+const BASE_INTERP_DELAY_MS = 80; // default render delay in ms (trimmed for snappier feel)
+const MIN_INTERP_DELAY_MS = 45; // clamp for low-ping sessions so remotes stay <50ms behind
+const MAX_REMOTE_EXTRAP_MS = 40; // allow gentle extrapolation when new snapshots haven't arrived
+const MAX_HISTORY = 45;
 
 // Physics constants (must mirror server)
 const BASE_SPEED = 220;
@@ -125,6 +127,7 @@ const localPlayer = {
 };
 let predictionActive = false; // remain false until user moves / jumps to avoid idle flicker
 const dustParticles = [];
+let lastRenderDelayMs = BASE_INTERP_DELAY_MS;
 
 // Mirror advanced jump tuning (keep in sync with server where possible)
 const JUMP_SUSTAIN_MS = 140;
@@ -257,12 +260,21 @@ socket.on('state', s => {
     } else {
       // Active prediction: soft reconcile
       const dx = authoritative.x - localPlayer.x;
-      if (Math.abs(dx) > 6) localPlayer.x += dx * 0.3;
-      const dy = authoritative.y - localPlayer.y;
-      if (Math.abs(dy) > 12) { // slightly larger threshold for vertical
-        localPlayer.y += dy * 0.3;
-        localPlayer.vy = authoritative.vy || localPlayer.vy;
+      const absDx = Math.abs(dx);
+      if (absDx > 0.5) {
+        const xFactor = absDx > 18 ? 0.5 : absDx > 8 ? 0.22 : 0.12;
+        localPlayer.x += dx * xFactor;
+        if (absDx > 30) localPlayer.x = authoritative.x; // hard snap if wildly out of sync
       }
+      localPlayer.vx = authoritative.vx || localPlayer.vx;
+      const dy = authoritative.y - localPlayer.y;
+      const absDy = Math.abs(dy);
+      if (absDy > 1) {
+        const yFactor = absDy > 24 ? 0.5 : absDy > 10 ? 0.24 : 0.14;
+        localPlayer.y += dy * yFactor;
+        if (absDy > 40) localPlayer.y = authoritative.y;
+      }
+      localPlayer.vy = authoritative.vy || localPlayer.vy;
       localPlayer.isTagger = authoritative.isTagger;
       localPlayer.dir = authoritative.dir || 1;
       localPlayer.isGrounded = authoritative.grounded || false;
@@ -442,38 +454,82 @@ function draw() {
   // Draw enhanced dust system
   drawDust();
 
-  // Enhanced player rendering with interpolation
-  const renderTime = (gameState.serverTime || Date.now()) - INTERP_DELAY_MS;
+  // Enhanced player rendering with interpolation (with light extrapolation)
+  const serverNow = gameState.serverTime || Date.now();
+  const desiredDelay = displayedPing != null
+    ? Math.min(BASE_INTERP_DELAY_MS, Math.max(MIN_INTERP_DELAY_MS, displayedPing + 10))
+    : BASE_INTERP_DELAY_MS;
+  const renderTime = serverNow - desiredDelay;
+  lastRenderDelayMs = desiredDelay;
   const rendered = new Map();
   
   for (const p of players) {
     if (p.id === localId) continue;
     const hist = remoteHistory.get(p.id);
-    if (!hist || hist.length < 2) continue;
-    
-    // find surrounding frames
-    let a = hist[0], b = hist[hist.length-1];
-    for (let i = 0; i < hist.length-1; i++) {
-      if (hist[i].t <= renderTime && hist[i+1].t >= renderTime) { 
-        a = hist[i]; 
-        b = hist[i+1]; 
-        break; 
+    if (!hist || !hist.length) continue;
+
+    let prev = hist[0];
+    let next = hist[hist.length - 1];
+
+    for (let i = 0; i < hist.length - 1; i++) {
+      const current = hist[i];
+      const following = hist[i + 1];
+      if (current.t <= renderTime && renderTime <= following.t) {
+        prev = current;
+        next = following;
+        break;
       }
     }
-    const span = b.t - a.t || 1;
-    const t = Math.min(1, Math.max(0, (renderTime - a.t)/span));
-    const ix = a.x + (b.x - a.x) * t;
-    const iy = a.y + (b.y - a.y) * t;
-    
-    rendered.set(p.id, { 
-      x: ix, 
-      y: iy, 
-      name: a.name, 
-      isTagger: a.isTagger,
-      dir: a.dir || 1,
-      vx: a.vx || 0,
-      vy: a.vy || 0,
-      color: a.color
+
+    let sample = next;
+    let ix, iy, dir, vx, vy, name, isTagger, color;
+
+    if (renderTime > next.t) {
+      const deltaMs = Math.min(renderTime - next.t, MAX_REMOTE_EXTRAP_MS);
+      const ratio = deltaMs / 1000;
+      ix = next.x + (next.vx || 0) * ratio;
+      iy = next.y + (next.vy || 0) * ratio;
+      dir = next.dir || 1;
+      vx = next.vx || 0;
+      vy = next.vy || 0;
+      name = next.name;
+      isTagger = next.isTagger;
+      color = next.color;
+    } else if (renderTime < prev.t || prev === next) {
+      sample = prev;
+      ix = sample.x;
+      iy = sample.y;
+      dir = sample.dir || 1;
+      vx = sample.vx || 0;
+      vy = sample.vy || 0;
+      name = sample.name;
+      isTagger = sample.isTagger;
+      color = sample.color;
+    } else {
+      const span = Math.max(next.t - prev.t, 1);
+      const alpha = Math.min(1, Math.max(0, (renderTime - prev.t) / span));
+      ix = prev.x + (next.x - prev.x) * alpha;
+      iy = prev.y + (next.y - prev.y) * alpha;
+      dir = alpha < 0.5 ? (prev.dir || 1) : (next.dir || 1);
+      vx = (prev.vx || 0) + ((next.vx || 0) - (prev.vx || 0)) * alpha;
+      vy = (prev.vy || 0) + ((next.vy || 0) - (prev.vy || 0)) * alpha;
+      name = alpha < 0.5 ? prev.name : next.name;
+      isTagger = alpha < 0.5 ? prev.isTagger : next.isTagger;
+      color = alpha < 0.5 ? prev.color : next.color;
+    }
+
+    const clampedX = Math.max(0, Math.min(1600, ix));
+    const clampedY = Math.max(0, iy);
+
+    rendered.set(p.id, {
+      x: clampedX,
+      y: clampedY,
+      name,
+      isTagger,
+      dir,
+      vx,
+      vy,
+      color
     });
   }
 
@@ -638,6 +694,7 @@ function draw() {
       localPlayer.id ? `LOCAL PRED x:${localPlayer.x.toFixed(1)} y:${localPlayer.y.toFixed(1)} g:${localPlayer.isGrounded}` : 'LOCAL PRED: none',
       `TAGGER: ${gameState.taggerId || 'none'}`,
       `PING: ${displayedPing ?? '--'} ms`,
+      `RENDER DELAY: ${lastRenderDelayMs.toFixed(1)} ms`,
       'F2 toggle debug'
     ].join('\n');
   }
