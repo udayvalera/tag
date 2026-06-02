@@ -3,6 +3,44 @@ import { SceneDecorator, ensureCtxRoundRectSupport } from './render.js';
 
 const socket = io();
 
+const elementCache = new Map();
+
+function elem(id) {
+  let el = elementCache.get(id);
+  if (!el) {
+    el = document.getElementById(id);
+    if (el) elementCache.set(id, el);
+  }
+  return el;
+}
+
+function setHidden(el, hidden) {
+  if (!el) return;
+  if (el.classList.contains('hidden') !== hidden) {
+    el.classList.toggle('hidden', hidden);
+  }
+}
+
+function setTextIfChanged(el, value) {
+  if (!el) return;
+  const next = String(value);
+  if (el.textContent !== next) el.textContent = next;
+}
+
+function setHtmlIfChanged(el, value) {
+  if (!el || el.innerHTML === value) return;
+  el.innerHTML = value;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
 // --- Latency / Ping Measurement ---
 let lastPingSentAt = 0;
 const pingSamples = [];
@@ -20,13 +58,13 @@ socket.on('latencyPong', ({ t }) => {
   const rtt = now - t; // client timestamp echoed back
   pingSamples.push(rtt);
   while (pingSamples.length > MAX_PING_SAMPLES) pingSamples.shift();
-  const avg = pingSamples.reduce((a,b)=>a+b,0)/pingSamples.length;
+  const avg = pingSamples.reduce((a, b) => a + b, 0) / pingSamples.length;
   displayedPing = Math.round(avg);
   updateLatencyDisplay();
 });
 
 function updateLatencyDisplay() {
-  const fpsEl = document.getElementById('fpsLatency');
+  const fpsEl = elem('fpsLatency');
   if (!fpsEl) return;
   const pingStr = displayedPing == null ? '--' : displayedPing;
   let cls = '';
@@ -36,7 +74,7 @@ function updateLatencyDisplay() {
     else cls = 'bad';
   }
   const fpsText = fpsEl.dataset.fpsText || 'FPS: --';
-  fpsEl.innerHTML = `${fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`;
+  setHtmlIfChanged(fpsEl, `${fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`);
 }
 
 setInterval(() => {
@@ -89,17 +127,21 @@ elem('backToMenu').onclick = () => {
   location.reload();
 };
 
-function elem(id){ return document.getElementById(id); }
-
-let gameState = { 
-  players:[], 
-  platforms:[], 
-  state:'waiting', 
-  taggerId:null, 
-  countdownRemainingMs:0, 
-  gameRemainingMs:0, 
-  leaderId:null, 
-  serverTime:0 
+let gameState = {
+  players: [],
+  platforms: [],
+  state: 'waiting',
+  taggerId: null,
+  countdownRemainingMs: 0,
+  gameRemainingMs: 0,
+  leaderId: null,
+  serverTime: 0
+};
+let world = {
+  platforms: [],
+  worldWidth: 1600,
+  worldHeight: 720,
+  version: null
 };
 let localId = null;
 let inputSeq = 0;
@@ -116,18 +158,25 @@ const TAGGER_SPEED_MULT = 1.08;
 const GRAVITY = 1400;
 const JUMP_VELOCITY = 720;
 const PLAYER_HEIGHT = 36;
-const PLAYER_RADIUS = PLAYER_HEIGHT/2;
+const PLAYER_RADIUS = PLAYER_HEIGHT / 2;
 
-const localPlayer = { 
-  id:null, 
-  x:0,y:0,vx:0,vy:0,dir:1,isTagger:false,isGrounded:false,
-  jumpHeld:false,canVariable:false,jumpStart:0, 
-  lastGroundedTime:0, 
-  bufferedJumpTime:0 
+const localPlayer = {
+  id: null,
+  x: 0, y: 0, vx: 0, vy: 0, dir: 1, isTagger: false, isGrounded: false,
+  jumpHeld: false, canVariable: false, jumpStart: 0,
+  lastGroundedTime: 0,
+  bufferedJumpTime: 0
 };
 let predictionActive = false; // remain false until user moves / jumps to avoid idle flicker
-const dustParticles = [];
+const smokePuffs = [];
+const runSmokeLastAt = new Map();
+const MAX_SMOKE_PUFFS = 24;
+const SMOKE_FRAME_COUNT = 8;
+const RUN_SMOKE_INTERVAL_MS = 90;
 let lastRenderDelayMs = BASE_INTERP_DELAY_MS;
+let latestAuthoritativeLocal = null;
+let serverClockOffsetMs = 0;
+let hasServerClockOffset = false;
 
 // Mirror advanced jump tuning (keep in sync with server where possible)
 const JUMP_SUSTAIN_MS = 140;
@@ -139,188 +188,224 @@ const JUMP_BUFFER_MS = 90;
 let lastPredictTime = null;
 let lastInputTime = null;
 
-// Enhanced dust system
-function spawnDust(x, y, color) {
+function spawnSmokePuff({
+  x,
+  y,
+  dir = 1,
+  scale = 1.35,
+  life = 280,
+  vx = 0,
+  vy = 0
+}) {
   if (!ENHANCED_PARTICLES) return;
-  
-  const count = 3;
-  for (let i = 0; i < count; i++) {
-    dustParticles.push({
-      x: x + (Math.random() * 12 - 6),
-      y: y + (Math.random() * 6 - 3),
-      vx: (Math.random() * 40 - 20) * (Math.random() > 0.5 ? 1 : -1),
-      vy: Math.random() * 50 + 30,
-      life: 300 + Math.random() * 100,
-      t: 0,
-      c: color,
-      r: 3 + Math.random() * 4
+  if (![x, y, scale, life, vx, vy].every(Number.isFinite)) return;
+
+  while (smokePuffs.length >= MAX_SMOKE_PUFFS) {
+    smokePuffs.shift();
+  }
+
+  smokePuffs.push({ x, y, dir, scale, life, vx, vy, t: 0 });
+}
+
+function spawnRunSmoke(id, player, now) {
+  if (!ENHANCED_PARTICLES || !id || !player) return;
+
+  const speed = Math.abs(player.vx ?? 0);
+  const grounded = player.grounded ?? player.isGrounded;
+  if (!grounded || speed < 45) {
+    runSmokeLastAt.delete(id);
+    return;
+  }
+
+  const last = runSmokeLastAt.get(id) ?? 0;
+  if (now - last < RUN_SMOKE_INTERVAL_MS) return;
+  runSmokeLastAt.set(id, now);
+
+  const dir = player.dir || 1;
+  spawnSmokePuff({
+    x: player.x - dir * 20,
+    y: player.y + 2,
+    dir,
+    scale: 1.15,
+    life: 250,
+    vx: -dir * 24,
+    vy: 8
+  });
+}
+
+function spawnJumpSmoke(x, y, dir) {
+  spawnSmokePuff({
+    x,
+    y: y + 2,
+    dir,
+    scale: 1.65,
+    life: 300,
+    vx: -(dir || 1) * 10,
+    vy: 12
+  });
+}
+
+function spawnLandingSmoke(x, y, dir) {
+  spawnSmokePuff({
+    x,
+    y: y + 2,
+    dir,
+    scale: 1.75,
+    life: 320,
+    vx: -(dir || 1) * 8,
+    vy: 10
+  });
+}
+
+function spawnTagSmoke(x, y) {
+  const pattern = [
+    { dx: -24, dy: 4, dir: 1, scale: 1.15, vx: -80, vy: 26 },
+    { dx: -10, dy: 8, dir: 1, scale: 1.35, vx: -42, vy: 40 },
+    { dx: 8, dy: 10, dir: -1, scale: 1.45, vx: 44, vy: 44 },
+    { dx: 24, dy: 5, dir: -1, scale: 1.15, vx: 82, vy: 28 },
+    { dx: 0, dy: 20, dir: 1, scale: 1.25, vx: 0, vy: 72 },
+    { dx: -2, dy: -2, dir: -1, scale: 1.55, vx: 0, vy: 18 }
+  ];
+
+  for (const puff of pattern) {
+    spawnSmokePuff({
+      x: x + puff.dx,
+      y: y + puff.dy,
+      dir: puff.dir,
+      scale: puff.scale,
+      life: 300,
+      vx: puff.vx,
+      vy: puff.vy
     });
   }
 }
 
-function drawDust() {
+function updateAndDrawSmoke(dt) {
   if (!ENHANCED_PARTICLES) return;
-  
-  for (let i = dustParticles.length - 1; i >= 0; i--) {
-    const p = dustParticles[i];
-    p.t += 16;
+  const step = Math.min(dt || 1 / 60, 0.05);
+
+  for (let i = smokePuffs.length - 1; i >= 0; i--) {
+    const p = smokePuffs[i];
+    p.t += step * 1000;
     const age = p.t / p.life;
-    p.x += p.vx * 0.016;
-    p.y += p.vy * 0.016;
-    
+    p.x += p.vx * step;
+    p.y += p.vy * step;
+
     if (age >= 1) {
-      dustParticles.splice(i, 1);
+      smokePuffs.splice(i, 1);
       continue;
     }
-    
-    // Enhanced dust with glow
-    const alpha = (1 - age) * 0.4;
-    const size = p.r * (1 - age * 0.7);
-    
-    // Glow effect
-    const gradient = ctx.createRadialGradient(p.x, canvas.height - p.y, 0, p.x, canvas.height - p.y, size * 2);
-    const rgb = hexToRgb(p.c);
-    gradient.addColorStop(0, `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`);
-    gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(p.x, canvas.height - p.y, size * 2, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
 
-function hexToRgb(hex) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result ? {
-    r: parseInt(result[1], 16),
-    g: parseInt(result[2], 16),
-    b: parseInt(result[3], 16)
-  } : { r: 128, g: 128, b: 128 };
-}
-
-function drawSpeedLines(x, y, direction) {
-  const count = 5;
-  const lineLength = 20;
-  
-  ctx.globalAlpha = 0.6;
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
-  ctx.lineCap = 'round';
-  
-  for (let i = 0; i < count; i++) {
-    const offsetX = (Math.random() - 0.5) * 20;
-    const offsetY = (Math.random() - 0.5) * 20;
-    
-    ctx.beginPath();
-    const startX = x - direction * (lineLength + i * 5) + offsetX;
-    const startY = y + offsetY;
-    ctx.moveTo(startX, startY);
-    ctx.lineTo(startX + direction * lineLength, startY);
-    ctx.stroke();
+    const frame = Math.min(SMOKE_FRAME_COUNT - 1, Math.floor(age * SMOKE_FRAME_COUNT));
+    const alpha = age > 0.78 ? Math.max(0, (1 - age) / 0.22) : 1;
+    scene.drawSmokePuff({ ...p, frame, alpha }, { x: 0, y: 0 });
   }
-  
-  ctx.globalAlpha = 1;
 }
 
 socket.on('connect', () => { localId = socket.id; });
 
+socket.on('world', payload => {
+  world = {
+    platforms: Array.isArray(payload?.platforms) ? payload.platforms : [],
+    worldWidth: payload?.worldWidth ?? 1600,
+    worldHeight: payload?.worldHeight ?? 720,
+    version: payload?.version ?? null
+  };
+  gameState.platforms = world.platforms;
+});
+
 socket.on('state', s => {
-  gameState = s;
+  if (typeof s.serverTime === 'number') {
+    const sampleOffset = s.serverTime - performance.now();
+    serverClockOffsetMs = hasServerClockOffset
+      ? serverClockOffsetMs * 0.9 + sampleOffset * 0.1
+      : sampleOffset;
+    hasServerClockOffset = true;
+  }
+
+  gameState = {
+    ...s,
+    platforms: Array.isArray(s.platforms) ? s.platforms : world.platforms
+  };
+
   if (!window.__firstStateLogged) {
     console.log('[DEBUG:first-state]', {
       players: s.players.map(p => ({ id: p.id, x: p.x, y: p.y, grounded: p.grounded, tagger: p.isTagger })),
-      platforms: s.platforms?.length,
+      platforms: gameState.platforms?.length,
       state: s.state,
       serverTime: s.serverTime
     });
     window.__firstStateLogged = true;
   }
-  updatePlayerList(); 
+  updatePlayerList();
   updateStartButton();
-  
-  // Find local authoritative player
+
   const authoritative = s.players.find(p => p.id === localId);
   if (authoritative) {
     if (!localPlayer.id) {
-      Object.assign(localPlayer, { 
+      Object.assign(localPlayer, {
         id: authoritative.id,
-        color: authoritative.color 
+        color: authoritative.color
       });
     }
-    
+
+    latestAuthoritativeLocal = {
+      x: authoritative.x,
+      y: authoritative.y,
+      vx: authoritative.vx ?? 0,
+      vy: authoritative.vy ?? 0,
+      dir: authoritative.dir || 1,
+      isTagger: !!authoritative.isTagger,
+      grounded: !!authoritative.grounded,
+      color: authoritative.color
+    };
+
+    localPlayer.isTagger = latestAuthoritativeLocal.isTagger;
+    localPlayer.color = latestAuthoritativeLocal.color;
+
     if (!predictionActive) {
       // Before any local input, trust server completely (no partial corrections that cause flicker)
-      localPlayer.x = authoritative.x;
-      localPlayer.y = authoritative.y;
-      localPlayer.vx = authoritative.vx || 0;
-      localPlayer.vy = authoritative.vy || 0;
-      localPlayer.dir = authoritative.dir || 1;
-      localPlayer.isGrounded = authoritative.grounded || false;
-    } else {
-      // Active prediction: soft reconcile
-      const dx = authoritative.x - localPlayer.x;
-      const absDx = Math.abs(dx);
-      if (absDx > 0.5) {
-        const xFactor = absDx > 18 ? 0.5 : absDx > 8 ? 0.22 : 0.12;
-        localPlayer.x += dx * xFactor;
-        if (absDx > 30) localPlayer.x = authoritative.x; // hard snap if wildly out of sync
-      }
-      localPlayer.vx = authoritative.vx || localPlayer.vx;
-      const dy = authoritative.y - localPlayer.y;
-      const absDy = Math.abs(dy);
-      if (absDy > 1) {
-        const yFactor = absDy > 24 ? 0.5 : absDy > 10 ? 0.24 : 0.14;
-        localPlayer.y += dy * yFactor;
-        if (absDy > 40) localPlayer.y = authoritative.y;
-      }
-      localPlayer.vy = authoritative.vy || localPlayer.vy;
-      localPlayer.isTagger = authoritative.isTagger;
-      localPlayer.dir = authoritative.dir || 1;
-      localPlayer.isGrounded = authoritative.grounded || false;
+      localPlayer.x = latestAuthoritativeLocal.x;
+      localPlayer.y = latestAuthoritativeLocal.y;
+      localPlayer.vx = latestAuthoritativeLocal.vx;
+      localPlayer.vy = latestAuthoritativeLocal.vy;
+      localPlayer.dir = latestAuthoritativeLocal.dir;
+      localPlayer.isGrounded = latestAuthoritativeLocal.grounded;
     }
   }
-  
-  const now = performance.now();
-  // store remote snapshots
+
+  const activeRemoteIds = new Set();
   for (const p of s.players) {
     if (p.id === localId) continue;
+    activeRemoteIds.add(p.id);
     if (!remoteHistory.has(p.id)) remoteHistory.set(p.id, []);
     const arr = remoteHistory.get(p.id);
-    arr.push({ 
-      t: s.serverTime, 
-      x: p.x, 
-      y: p.y, 
-      isTagger: p.isTagger, 
+    arr.push({
+      t: s.serverTime,
+      x: p.x,
+      y: p.y,
+      isTagger: p.isTagger,
       name: p.name,
       dir: p.dir || 1,
-      vx: p.vx || 0,
-      vy: p.vy || 0,
-      color: p.color
+      vx: p.vx ?? 0,
+      vy: p.vy ?? 0,
+      color: p.color,
+      grounded: !!p.grounded
     });
     while (arr.length > MAX_HISTORY) arr.shift();
   }
+
+  for (const id of remoteHistory.keys()) {
+    if (!activeRemoteIds.has(id)) remoteHistory.delete(id);
+  }
 });
 
-socket.on('tag', ({ taggerId }) => { 
-  gameState.taggerId = taggerId; 
-  // Enhanced visual feedback for tag event
+socket.on('tag', ({ taggerId }) => {
+  gameState.taggerId = taggerId;
   if (ENHANCED_PARTICLES) {
-    // Create explosion of particles at tagger position
     const taggerPlayer = gameState.players.find(p => p.id === taggerId);
     if (taggerPlayer) {
-      for (let i = 0; i < 20; i++) {
-        dustParticles.push({
-          x: taggerPlayer.x + (Math.random() - 0.5) * 40,
-          y: taggerPlayer.y + (Math.random() - 0.5) * 40,
-          vx: (Math.random() - 0.5) * 200,
-          vy: (Math.random() - 0.5) * 200,
-          life: 500,
-          t: 0,
-          c: '#ff6b6b',
-          r: 2 + Math.random() * 3
-        });
-      }
+      spawnTagSmoke(taggerPlayer.x, taggerPlayer.y);
     }
   }
 });
@@ -328,32 +413,32 @@ socket.on('tag', ({ taggerId }) => {
 socket.on('playerLeft', ({ id }) => {
   // Remove from history
   remoteHistory.delete(id);
+  runSmokeLastAt.delete(id);
 });
 
 function showStatus(code) {
-  elem('menu').classList.add('hidden');
-  elem('statusBar').classList.remove('hidden');
-  elem('roomLabel').textContent = 'Room: ' + code;
-  elem('playerList').classList.remove('hidden');
+  setHidden(elem('menu'), true);
+  setHidden(elem('statusBar'), false);
+  setTextIfChanged(elem('roomLabel'), 'Room: ' + code);
+  setHidden(elem('playerList'), false);
 }
 
 // Input handling
 const keys = {};
 let justPressedJump = false;
 let justReleasedJump = false;
+let pendingPredictJumpPressed = false;
+let pendingPredictJumpReleased = false;
 
 window.addEventListener('keydown', e => {
   if (!keys[e.code]) {
     if (isJumpKey(e.code)) {
       justPressedJump = true;
-      // Visual feedback for jump
-      if (localPlayer.id && ENHANCED_PARTICLES && localPlayer.isGrounded) {
-        spawnDust(localPlayer.x, localPlayer.y, localPlayer.color || '#95a5a6');
-      }
+      pendingPredictJumpPressed = true;
     }
   }
   keys[e.code] = true;
-  
+
   if (isJumpKey(e.code) || e.code.startsWith('Arrow') || e.code === 'KeyA' || e.code === 'KeyD') {
     if (!predictionActive && localPlayer.id) {
       predictionActive = true;
@@ -364,13 +449,16 @@ window.addEventListener('keydown', e => {
 });
 
 window.addEventListener('keyup', e => {
-  if (isJumpKey(e.code)) justReleasedJump = true;
+  if (isJumpKey(e.code)) {
+    justReleasedJump = true;
+    pendingPredictJumpReleased = true;
+  }
   keys[e.code] = false;
   sendInput();
 });
 
-function isJumpKey(code) { 
-  return code === 'Space' || code === 'ArrowUp' || code === 'KeyW'; 
+function isJumpKey(code) {
+  return code === 'Space' || code === 'ArrowUp' || code === 'KeyW';
 }
 
 function sendInput() {
@@ -384,12 +472,12 @@ function sendInput() {
     jumpReleased: justReleasedJump,
     seq: ++inputSeq
   };
-  
+
   // Approx dt since last input for prediction step (fallback ~16ms)
-  const dt = lastInputTime ? (now - lastInputTime)/1000 : 0.016;
+  const dt = lastInputTime ? (now - lastInputTime) / 1000 : 0.016;
   payload.dt = dt;
   lastInputTime = now;
-  
+
   // Predict locally immediately
   socket.emit('input', {
     left: payload.left,
@@ -399,30 +487,26 @@ function sendInput() {
     jumpReleased: payload.jumpReleased,
     seq: payload.seq,
   });
-  
+
   justPressedJump = false;
   justReleasedJump = false;
 }
 
 // Render loop
-function draw() {
+function draw(now = performance.now()) {
   requestAnimationFrame(draw);
-  const { players, platforms, state, countdownRemainingMs, gameRemainingMs, taggerId } = gameState;
-  const now = performance.now();
-  const dtBg = lastBgTime ? (now - lastBgTime) / 1000 : 0;
+  frameCount++;
+  const { players, state, countdownRemainingMs, gameRemainingMs, taggerId } = gameState;
+  const platforms = world.platforms.length ? world.platforms : (gameState.platforms || []);
+  const dtBg = lastBgTime ? Math.min((now - lastBgTime) / 1000, 0.05) : 1 / 60;
   lastBgTime = now;
-  
+
   scene.update(dtBg);
   scene.drawBackground();
 
-  // Lightweight local horizontal prediction (no vertical) for responsiveness
   if (localPlayer.id && predictionActive) {
-    const now = performance.now();
-    if (!lastPredictTime) lastPredictTime = now;
-    let dt = (now - lastPredictTime)/1000;
-    if (dt > 0.05) dt = 0.05; // clamp large frame gaps
-    lastPredictTime = now;
-    updateLocalPrediction(dt, platforms);
+    updateLocalPrediction(dtBg, platforms);
+    reconcileLocalPlayer(dtBg);
   }
 
   // Debug platform rendering
@@ -434,7 +518,7 @@ function draw() {
       ctx.strokeRect(plat.x, topY, plat.w, plat.h);
     }
   }
-  
+
   // Draw platforms
   if (Array.isArray(platforms) && platforms.length) {
     try {
@@ -451,18 +535,17 @@ function draw() {
     ctx.fillText('NO PLATFORMS RECEIVED', 20, 40);
   }
 
-  // Draw enhanced dust system
-  drawDust();
-
   // Enhanced player rendering with interpolation (with light extrapolation)
-  const serverNow = gameState.serverTime || Date.now();
+  const serverNow = hasServerClockOffset
+    ? now + serverClockOffsetMs
+    : (gameState.serverTime || Date.now());
   const desiredDelay = displayedPing != null
     ? Math.min(BASE_INTERP_DELAY_MS, Math.max(MIN_INTERP_DELAY_MS, displayedPing + 10))
     : BASE_INTERP_DELAY_MS;
   const renderTime = serverNow - desiredDelay;
   lastRenderDelayMs = desiredDelay;
   const rendered = new Map();
-  
+
   for (const p of players) {
     if (p.id === localId) continue;
     const hist = remoteHistory.get(p.id);
@@ -482,43 +565,46 @@ function draw() {
     }
 
     let sample = next;
-    let ix, iy, dir, vx, vy, name, isTagger, color;
+    let ix, iy, dir, vx, vy, name, isTagger, color, grounded;
 
     if (renderTime > next.t) {
       const deltaMs = Math.min(renderTime - next.t, MAX_REMOTE_EXTRAP_MS);
       const ratio = deltaMs / 1000;
-      ix = next.x + (next.vx || 0) * ratio;
-      iy = next.y + (next.vy || 0) * ratio;
+      ix = next.x + (next.vx ?? 0) * ratio;
+      iy = next.y + (next.vy ?? 0) * ratio;
       dir = next.dir || 1;
-      vx = next.vx || 0;
-      vy = next.vy || 0;
+      vx = next.vx ?? 0;
+      vy = next.vy ?? 0;
       name = next.name;
       isTagger = next.isTagger;
       color = next.color;
+      grounded = next.grounded;
     } else if (renderTime < prev.t || prev === next) {
       sample = prev;
       ix = sample.x;
       iy = sample.y;
       dir = sample.dir || 1;
-      vx = sample.vx || 0;
-      vy = sample.vy || 0;
+      vx = sample.vx ?? 0;
+      vy = sample.vy ?? 0;
       name = sample.name;
       isTagger = sample.isTagger;
       color = sample.color;
+      grounded = sample.grounded;
     } else {
       const span = Math.max(next.t - prev.t, 1);
       const alpha = Math.min(1, Math.max(0, (renderTime - prev.t) / span));
       ix = prev.x + (next.x - prev.x) * alpha;
       iy = prev.y + (next.y - prev.y) * alpha;
       dir = alpha < 0.5 ? (prev.dir || 1) : (next.dir || 1);
-      vx = (prev.vx || 0) + ((next.vx || 0) - (prev.vx || 0)) * alpha;
-      vy = (prev.vy || 0) + ((next.vy || 0) - (prev.vy || 0)) * alpha;
+      vx = (prev.vx ?? 0) + ((next.vx ?? 0) - (prev.vx ?? 0)) * alpha;
+      vy = (prev.vy ?? 0) + ((next.vy ?? 0) - (prev.vy ?? 0)) * alpha;
       name = alpha < 0.5 ? prev.name : next.name;
       isTagger = alpha < 0.5 ? prev.isTagger : next.isTagger;
       color = alpha < 0.5 ? prev.color : next.color;
+      grounded = alpha < 0.5 ? prev.grounded : next.grounded;
     }
 
-    const clampedX = Math.max(0, Math.min(1600, ix));
+    const clampedX = Math.max(0, Math.min(world.worldWidth, ix));
     const clampedY = Math.max(0, iy);
 
     rendered.set(p.id, {
@@ -529,142 +615,101 @@ function draw() {
       dir,
       vx,
       vy,
-      color
+      color,
+      grounded
     });
   }
 
-  // Draw remote players with motion effects
+  for (const [id, rp] of rendered) {
+    spawnRunSmoke(id, rp, now);
+  }
+
+  const lpServer = localPlayer.id ? players.find(p => p.id === localId) : null;
+  if (localPlayer.id) {
+    spawnRunSmoke(localId, {
+      x: localPlayer.x,
+      y: localPlayer.y,
+      dir: localPlayer.dir,
+      vx: localPlayer.vx,
+      vy: localPlayer.vy,
+      grounded: lpServer?.grounded ?? localPlayer.isGrounded
+    }, now);
+  }
+
+  updateAndDrawSmoke(dtBg);
+
+  // Draw remote players
   for (const p of players) {
     if (p.id === localId) continue;
     const rp = rendered.get(p.id);
     if (!rp) continue;
-    
-    // Motion blur/trail effect for moving players
-    if (ENHANCED_PARTICLES && Math.abs(rp.vx) > 20) {
-      ctx.globalAlpha = 0.3;
-      const trailX = rp.x - rp.dir * 8;
-      scene.drawPlayer(
-        { 
-          x: trailX, 
-          y: rp.y, 
-          name: rp.name, 
-          isTagger: rp.isTagger, 
-          dir: rp.dir, 
-          vx: rp.vx, 
-          vy: rp.vy, 
-          color: rp.color 
-        }, 
-        { x: 0, y: 0 }, 
-        false, 
-        rp.isTagger
-      );
-      ctx.globalAlpha = 1;
-    }
-    
+
     // Main player render
     scene.drawPlayer(
-      { 
-        x: rp.x, 
-        y: rp.y, 
-        name: rp.name, 
-        isTagger: rp.isTagger, 
-        dir: rp.dir, 
-        vx: rp.vx, 
-        vy: rp.vy, 
-        color: rp.color 
-      }, 
-      { x: 0, y: 0 }, 
-      false, 
+      {
+        x: rp.x,
+        y: rp.y,
+        name: rp.name,
+        isTagger: rp.isTagger,
+        dir: rp.dir,
+        vx: rp.vx,
+        vy: rp.vy,
+        color: rp.color,
+        grounded: rp.grounded
+      },
+      { x: 0, y: 0 },
+      false,
       rp.isTagger
     );
   }
 
-  // Local player rendering with enhanced effects
+  // Local player rendering
   if (localPlayer.id) {
-    const lpServer = players.find(p => p.id === localId);
     const color = lpServer?.color;
-    
-    // Local player trail effect
-    if (ENHANCED_PARTICLES && Math.abs(localPlayer.vx) > 20) {
-      ctx.globalAlpha = 0.2;
-      const trailX = localPlayer.x - localPlayer.dir * 8;
-      scene.drawPlayer(
-        { 
-          x: trailX, 
-          y: localPlayer.y, 
-          name: lpServer?.name || 'You', 
-          isTagger: localPlayer.isTagger, 
-          dir: localPlayer.dir, 
-          vx: localPlayer.vx, 
-          vy: localPlayer.vy, 
-          color: color 
-        }, 
-        { x: 0, y: 0 }, 
-        true, 
-        localPlayer.isTagger
-      );
-      ctx.globalAlpha = 1;
-    }
-    
+
     // Main local player render
     scene.drawPlayer(
-      { 
-        x: localPlayer.x, 
-        y: localPlayer.y, 
-        name: lpServer?.name || 'You', 
-        isTagger: localPlayer.isTagger, 
-        dir: localPlayer.dir, 
-        vx: localPlayer.vx, 
-        vy: localPlayer.vy, 
-        color: color 
-      }, 
-      { x: 0, y: 0 }, 
-      true, 
+      {
+        x: localPlayer.x,
+        y: localPlayer.y,
+        name: lpServer?.name || 'You',
+        isTagger: localPlayer.isTagger,
+        dir: localPlayer.dir,
+        vx: localPlayer.vx,
+        vy: localPlayer.vy,
+        color: color,
+        grounded: lpServer?.grounded ?? localPlayer.isGrounded
+      },
+      { x: 0, y: 0 },
+      true,
       localPlayer.isTagger
     );
-    
-    // Enhanced dust spawning for local player
-    if (lpServer?.grounded && Math.abs(localPlayer.vx) > 30) {
-      if (Math.random() < 0.4) {
-        spawnDust(localPlayer.x, localPlayer.y - 8, color || '#95a5a6');
-      }
-    }
-    
-    // Speed lines effect for fast movement
-    if (ENHANCED_PARTICLES && Math.abs(localPlayer.vx) > 100) {
-      drawSpeedLines(localPlayer.x, localPlayer.y, localPlayer.dir);
-    }
-    
-    // Jump particles
-    if (justPressedJump && localPlayer.vy > 0 && ENHANCED_PARTICLES) {
-      spawnDust(localPlayer.x, localPlayer.y, color || '#95a5a6');
-    }
   }
 
   // Enhanced UI overlays
   if (state === 'countdown') {
     const cd = Math.ceil(countdownRemainingMs / 1000);
-    elem('countdown').classList.remove('hidden');
+    setHidden(elem('countdown'), false);
     const taggerName = players.find(p => p.id === taggerId)?.name || '';
-  const cdNum = elem('countdown-number');
-  const cdText = elem('countdown-text');
-  const cdTagger = elem('countdown-tagger');
-  if (cdNum) cdNum.textContent = cd;
-  if (cdText) cdText.textContent = 'GET READY!';
-  if (cdTagger) cdTagger.innerHTML = `Tagger: <span class="tagger-name">${taggerName}</span>`;
+    const cdNum = elem('countdown-number');
+    const cdText = elem('countdown-text');
+    const cdTagger = elem('countdown-tagger');
+    setTextIfChanged(cdNum, cd);
+    setTextIfChanged(cdText, 'GET READY!');
+    setHtmlIfChanged(cdTagger, `Tagger: <span class="tagger-name">${escapeHtml(taggerName)}</span>`);
   } else {
-    elem('countdown').classList.add('hidden');
+    setHidden(elem('countdown'), true);
   }
 
   if (state === 'running') {
     const timeLeft = (gameRemainingMs / 1000).toFixed(1);
-    elem('timer').innerHTML = `⏰ ${timeLeft}s`;
+    setHtmlIfChanged(elem('timer'), `⏰ ${timeLeft}s`);
     const taggerName = players.find(p => p.id === taggerId)?.name || 'Nobody';
-    elem('tagger').innerHTML = `🏷️ ${taggerName}`;
+    setHtmlIfChanged(elem('tagger'), `🏷️ ${escapeHtml(taggerName)}`);
   }
 
   if (state === 'ended') {
-    elem('gameOver').classList.remove('hidden');
+    setHidden(elem('gameOver'), false);
     if (!elem('results').dataset.filled) {
       const sorted = [...players].sort((a, b) => {
         // Sort by some metric - final tagger first, then alphabetical
@@ -672,13 +717,13 @@ function draw() {
         if (b.id === taggerId) return 1;
         return a.name.localeCompare(b.name);
       });
-      
-      elem('results').innerHTML = sorted.map((p, index) => 
+
+      setHtmlIfChanged(elem('results'), sorted.map((p, index) =>
         `<div class="result-item">
-          ${index + 1}. ${p.name}
+          ${index + 1}. ${escapeHtml(p.name)}
           ${p.id === taggerId ? '<span class="final-tagger">🏆 FINAL TAGGER</span>' : ''}
         </div>`
-      ).join('');
+      ).join(''));
       elem('results').dataset.filled = '1';
     }
   }
@@ -689,8 +734,8 @@ function draw() {
     __debugDiv.textContent = [
       `STATE: ${state}`,
       `PLAYERS: ${gameState.players.length} (rendered remotes: ${[...remoteHistory.keys()].length})`,
-      `PLATFORMS: ${gameState.platforms?.length ?? 0}`,
-      lp ? `LOCAL AUTH x:${lp.x.toFixed(1)} y:${lp.y.toFixed(1)} vy:${(lp.vy||0).toFixed(1)} g:${lp.grounded}` : 'LOCAL AUTH: none',
+      `PLATFORMS: ${platforms?.length ?? 0}`,
+      lp ? `LOCAL AUTH x:${lp.x.toFixed(1)} y:${lp.y.toFixed(1)} vy:${(lp.vy || 0).toFixed(1)} g:${lp.grounded}` : 'LOCAL AUTH: none',
       localPlayer.id ? `LOCAL PRED x:${localPlayer.x.toFixed(1)} y:${localPlayer.y.toFixed(1)} g:${localPlayer.isGrounded}` : 'LOCAL PRED: none',
       `TAGGER: ${gameState.taggerId || 'none'}`,
       `PING: ${displayedPing ?? '--'} ms`,
@@ -700,36 +745,75 @@ function draw() {
   }
 }
 
-draw();
+function reconcileLocalPlayer(dt) {
+  const auth = latestAuthoritativeLocal;
+  if (!auth || !predictionActive) return;
+
+  localPlayer.isTagger = auth.isTagger;
+  localPlayer.color = auth.color;
+
+  const dx = auth.x - localPlayer.x;
+  const dy = auth.y - localPlayer.y;
+
+  if (Math.abs(dx) > 160 || Math.abs(dy) > 220) {
+    localPlayer.x = auth.x;
+    localPlayer.y = auth.y;
+    localPlayer.vx = auth.vx;
+    localPlayer.vy = auth.vy;
+    localPlayer.dir = auth.dir;
+    localPlayer.isGrounded = auth.grounded;
+    localPlayer.canVariable = false;
+    return;
+  }
+
+  const correction = 1 - Math.exp(-10 * Math.min(dt, 0.05));
+  localPlayer.x += dx * correction;
+  localPlayer.y += dy * correction;
+
+  const movingHorizontally = keys['ArrowLeft'] || keys['KeyA'] || keys['ArrowRight'] || keys['KeyD'];
+  if (!movingHorizontally) {
+    localPlayer.vx = auth.vx;
+    localPlayer.dir = auth.dir;
+  }
+
+  if (Math.abs(dy) < 4 && auth.grounded) {
+    localPlayer.isGrounded = true;
+    localPlayer.vy = auth.vy;
+    localPlayer.canVariable = false;
+  }
+}
 
 function updateLocalPrediction(dt, platforms) {
+  const wasGrounded = localPlayer.isGrounded;
+
   // Horizontal movement
   const left = keys['ArrowLeft'] || keys['KeyA'];
   const right = keys['ArrowRight'] || keys['KeyD'];
   const speed = BASE_SPEED * (localPlayer.isTagger ? TAGGER_SPEED_MULT : 1);
   localPlayer.vx = (left ? -speed : 0) + (right ? speed : 0);
-  if (left) localPlayer.dir = -1; 
+  if (left) localPlayer.dir = -1;
   else if (right) localPlayer.dir = 1;
-  
+
   // Track jump hold state
   localPlayer.jumpHeld = !!(keys['Space'] || keys['ArrowUp'] || keys['KeyW']);
 
   const nowMs = performance.now();
   if (localPlayer.isGrounded) localPlayer.lastGroundedTime = nowMs;
-  
+
   // Jump input handling with coyote time and buffering
-  if (justPressedJump) {
+  if (pendingPredictJumpPressed) {
     // attempt jump (coyote)
     if (localPlayer.isGrounded || (nowMs - localPlayer.lastGroundedTime) <= COYOTE_MS) {
       localPlayer.vy = JUMP_VELOCITY;
       localPlayer.jumpStart = nowMs;
       localPlayer.canVariable = true;
       localPlayer.isGrounded = false;
+      spawnJumpSmoke(localPlayer.x, localPlayer.y, localPlayer.dir);
     } else {
       localPlayer.bufferedJumpTime = nowMs;
     }
   }
-  
+
   if (localPlayer.bufferedJumpTime && (nowMs - localPlayer.bufferedJumpTime) <= JUMP_BUFFER_MS) {
     if (localPlayer.isGrounded || (nowMs - localPlayer.lastGroundedTime) <= COYOTE_MS) {
       localPlayer.vy = JUMP_VELOCITY;
@@ -737,9 +821,10 @@ function updateLocalPrediction(dt, platforms) {
       localPlayer.canVariable = true;
       localPlayer.isGrounded = false;
       localPlayer.bufferedJumpTime = 0;
+      spawnJumpSmoke(localPlayer.x, localPlayer.y, localPlayer.dir);
     }
   }
-  
+
   // Variable jump height control
   if (localPlayer.vy > 0 && localPlayer.canVariable) {
     const elapsed = nowMs - localPlayer.jumpStart;
@@ -768,7 +853,7 @@ function updateLocalPrediction(dt, platforms) {
     const topSurface = plat.y + plat.h;
     const underside = plat.y;
     const overlapX = (localPlayer.x + PLAYER_RADIUS) > plat.x && (localPlayer.x - PLAYER_RADIUS) < (plat.x + plat.w);
-    
+
     // Landing detection
     if (overlapX && localPlayer.vy <= 0 && (localPlayer.y < topSurface) && (localPlayer.y > topSurface - 120)) {
       // approximate previous y to check crossing
@@ -778,14 +863,11 @@ function updateLocalPrediction(dt, platforms) {
         localPlayer.vy = 0;
         localPlayer.isGrounded = true;
         localPlayer.canVariable = false;
-        // Spawn landing dust
-        if (ENHANCED_PARTICLES) {
-          spawnDust(localPlayer.x, localPlayer.y, localPlayer.color || '#95a5a6');
-        }
+        if (!wasGrounded) spawnLandingSmoke(localPlayer.x, localPlayer.y, localPlayer.dir);
         continue;
       }
     }
-    
+
     // Ceiling collision
     if (overlapX && localPlayer.vy > 0) {
       const headPrev = (localPlayer.y - localPlayer.vy * dt) + PLAYER_HEIGHT;
@@ -797,22 +879,23 @@ function updateLocalPrediction(dt, platforms) {
       }
     }
   }
-  
+
   if (localPlayer.isGrounded) localPlayer.vy = 0;
-  
+
   // World bounds
   if (localPlayer.x < 0) localPlayer.x = 0;
-  if (localPlayer.x > 1600) localPlayer.x = 1600;
+  if (localPlayer.x > world.worldWidth) localPlayer.x = world.worldWidth;
   if (localPlayer.y < 40) { // ground clamp fallback
-    localPlayer.y = 40; 
-    localPlayer.vy = 0; 
-    localPlayer.isGrounded = true; 
+    localPlayer.y = 40;
+    localPlayer.vy = 0;
+    localPlayer.isGrounded = true;
     localPlayer.canVariable = false;
+    if (!wasGrounded) spawnLandingSmoke(localPlayer.x, localPlayer.y, localPlayer.dir);
   }
 
-  // Reset one-shot jump detection flags locally AFTER using them
-  justPressedJump = false;
-  justReleasedJump = false;
+  // Reset one-shot prediction flags locally AFTER using them.
+  pendingPredictJumpPressed = false;
+  pendingPredictJumpReleased = false;
 }
 
 // Start game button (leader only)
@@ -825,53 +908,44 @@ elem('startGameBtn').onclick = () => {
 
 function updateStartButton() {
   const btn = elem('startGameBtn');
-  if (gameState.state === 'waiting' && gameState.leaderId === localId && gameState.players.length >= 2) {
-    btn.classList.remove('hidden');
-  } else {
-    btn.classList.add('hidden');
-  }
+  const visible = gameState.state === 'waiting' && gameState.leaderId === localId && gameState.players.length >= 2;
+  setHidden(btn, !visible);
 }
+
+let lastPlayerListKey = '';
 
 function updatePlayerList() {
   const wrap = elem('playerList');
   if (!wrap) return;
   const { players, taggerId, leaderId } = gameState;
-  
-  wrap.innerHTML = `<h3>👥 PLAYERS (${players.length})</h3>`;
-  
-  players.forEach(p => {
+  const key = JSON.stringify({
+    players: players.map(p => [p.id, p.name, p.color]),
+    taggerId,
+    leaderId,
+    localId
+  });
+  if (key === lastPlayerListKey) return;
+  lastPlayerListKey = key;
+
+  const rows = players.map(p => {
     const badges = [];
     if (p.id === leaderId) badges.push('<span class="leaderBadge">👑 LEADER</span>');
     if (p.id === taggerId) badges.push('<span class="tagBadge">🏷️ TAGGER</span>');
     if (p.id === localId) badges.push('<span class="selfBadge">⭐ YOU</span>');
-    
+
     const rowClass = p.id === leaderId ? 'leader' : '';
     const playerColor = p.color || '#95a5a6';
-    
-    wrap.innerHTML += `
+
+    return `
       <div class="playerRow ${rowClass}">
-        <span style="flex:1; color: ${playerColor}; font-weight: bold;">${p.name}</span>
+        <span style="flex:1; color: ${playerColor}; font-weight: bold;">${escapeHtml(p.name)}</span>
         ${badges.join(' ')}
       </div>
     `;
-  });
-}
+  }).join('');
 
-// Enhanced status updates
-function updateStatusBar() {
-  if (gameState.state === 'running') {
-    const timeLeft = (gameState.gameRemainingMs / 1000).toFixed(1);
-    if (elem('timer')) elem('timer').innerHTML = `⏰ ${timeLeft}s`;
-    
-    const taggerName = gameState.players.find(p => p.id === gameState.taggerId)?.name || 'Nobody';
-    if (elem('tagger')) elem('tagger').innerHTML = `🏷️ ${taggerName}`;
-  }
+  setHtmlIfChanged(wrap, `<h3>👥 PLAYERS (${players.length})</h3>${rows}`);
 }
-
-// Game state change handler
-socket.on('state', () => {
-  updateStatusBar();
-});
 
 // Window resize handler for responsive canvas
 window.addEventListener('resize', () => {
@@ -909,13 +983,12 @@ document.body.appendChild(fpsElement);
 
 setInterval(() => {
   const now = performance.now();
-  frameCount++;
   if (now - lastFPSUpdate >= 1000) {
     const fps = Math.round((frameCount * 1000) / (now - lastFPSUpdate));
     fpsElement.dataset.fpsText = `FPS: ${fps}`;
     // refresh combined display preserving current ping
     const pingSpan = fpsElement.querySelector('.pingValue');
-    const currentPing = pingSpan ? pingSpan.textContent.replace(/[^0-9-]/g,'') : (displayedPing==null?'--':displayedPing);
+    const currentPing = pingSpan ? pingSpan.textContent.replace(/[^0-9-]/g, '') : (displayedPing == null ? '--' : displayedPing);
     const pingStr = displayedPing == null ? currentPing : displayedPing;
     let cls = '';
     if (displayedPing != null) {
@@ -923,11 +996,13 @@ setInterval(() => {
       else if (displayedPing < 140) cls = 'ok';
       else cls = 'bad';
     }
-    fpsElement.innerHTML = `${fpsElement.dataset.fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`;
+    setHtmlIfChanged(fpsElement, `${fpsElement.dataset.fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`);
     frameCount = 0;
     lastFPSUpdate = now;
   }
 }, 100);
+
+let renderLoopStarted = false;
 
 // Initialize game
 function initGame() {
@@ -936,9 +1011,12 @@ function initGame() {
   canvas.style.imageRendering = 'pixelated';
   canvas.style.imageRendering = '-moz-crisp-edges';
   canvas.style.imageRendering = 'crisp-edges';
-  
+
   // Start the main render loop
-  draw();
+  if (!renderLoopStarted) {
+    renderLoopStarted = true;
+    requestAnimationFrame(draw);
+  }
 }
 
 // Start the game when DOM is loaded
@@ -954,7 +1032,7 @@ if (typeof module !== 'undefined' && module.exports) {
     gameState,
     localPlayer,
     updateLocalPrediction,
-    spawnDust,
-    drawDust
+    spawnSmokePuff,
+    updateAndDrawSmoke
   };
 }
