@@ -355,6 +355,7 @@ socket.on('state', s => {
     });
     window.__firstStateLogged = true;
   }
+  syncHudState(gameState.state);
   updatePlayerList();
   updateStartButton();
 
@@ -446,6 +447,7 @@ function showStatus(code) {
   if (roomLabel) roomLabel.dataset.roomCode = code;
   setTextIfChanged(roomLabel, 'ROOM ' + code);
   setHidden(elem('playerList'), false);
+  syncHudState(gameState.state);
 }
 
 // Input handling
@@ -528,6 +530,7 @@ function draw(now = performance.now()) {
 
   scene.update(dtBg);
   scene.drawBackground();
+  syncHudState(state);
 
   if (localPlayer.id && predictionActive) {
     updateLocalPrediction(dtBg, platforms);
@@ -949,6 +952,50 @@ function updateStartButton() {
 }
 
 let lastPlayerListKey = '';
+let lastHudState = '';
+let playerListExpanded = true;
+
+function isGameplayHudState(state) {
+  return state === 'countdown' || state === 'running';
+}
+
+function applyPlayerListHudState() {
+  const wrap = elem('playerList');
+  if (!wrap) return;
+  const state = gameState.state || document.body.dataset.gameState || 'waiting';
+  const expanded = state === 'waiting' || playerListExpanded;
+  wrap.classList.toggle('expanded', expanded);
+  wrap.classList.toggle('collapsed', !expanded);
+  wrap.classList.toggle('gameplay', isGameplayHudState(state));
+}
+
+function setPlayerListExpanded(expanded) {
+  const shouldExpand = gameState.state === 'waiting' || !!expanded;
+  if (playerListExpanded === shouldExpand) return;
+  playerListExpanded = shouldExpand;
+  lastPlayerListKey = '';
+  applyPlayerListHudState();
+  updatePlayerList();
+}
+
+function syncHudState(state) {
+  const normalized = state || 'waiting';
+  if (document.body.dataset.gameState !== normalized) {
+    document.body.dataset.gameState = normalized;
+  }
+
+  if (lastHudState !== normalized) {
+    if (normalized === 'waiting') {
+      playerListExpanded = true;
+    } else if (isGameplayHudState(normalized) || normalized === 'ended') {
+      playerListExpanded = false;
+    }
+    lastHudState = normalized;
+    lastPlayerListKey = '';
+  }
+
+  applyPlayerListHudState();
+}
 
 function updatePlayerList() {
   const wrap = elem('playerList');
@@ -958,10 +1005,13 @@ function updatePlayerList() {
     players: players.map(p => [p.id, p.name, p.color, p.headbandId]),
     taggerId,
     leaderId,
-    localId
+    localId,
+    state: gameState.state,
+    playerListExpanded
   });
   if (key === lastPlayerListKey) return;
   lastPlayerListKey = key;
+  applyPlayerListHudState();
 
   const rows = players.map(p => {
     const badges = [];
@@ -980,8 +1030,26 @@ function updatePlayerList() {
     `;
   }).join('');
 
-  setHtmlIfChanged(wrap, `<h3>RUNNERS (${players.length})</h3>${rows}`);
+  const taggerName = players.find(p => p.id === taggerId)?.name;
+  const meta = taggerName ? `IT ${escapeHtml(taggerName)}` : 'WAITING';
+  const expanded = gameState.state === 'waiting' || playerListExpanded;
+
+  setHtmlIfChanged(wrap, `
+    <button class="playerListToggle" type="button" aria-expanded="${expanded ? 'true' : 'false'}">
+      <span class="playerListTitle">RUNNERS (${players.length})</span>
+      <span class="playerListMeta">${meta}</span>
+    </button>
+    <div class="playerListRows">
+      ${rows}
+    </div>
+  `);
 }
+
+elem('playerList')?.addEventListener('click', e => {
+  const toggle = e.target.closest('.playerListToggle');
+  if (!toggle || gameState.state === 'waiting') return;
+  setPlayerListExpanded(!playerListExpanded);
+});
 
 // Window resize handler for responsive canvas
 window.addEventListener('resize', () => {
