@@ -2,6 +2,7 @@ import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { customAlphabet } from 'nanoid';
+import { PLAYER_COLLISION, getHeadbandByIndex } from './public/game-config.js';
 
 const nanoid = customAlphabet('ABCDEFGHJKMNPQRSTUVWXYZ23456789', 6);
 
@@ -39,8 +40,9 @@ const BASE_SPEED = 220; // units per second
 // Platform vertical gaps require ~174 max step, so this gives slight buffer without feeling floaty.
 const JUMP_VELOCITY = 720; // units/s
 const GRAVITY = 1400; // units/s^2 (slightly higher for a crisp fall)
-const PLAYER_HEIGHT = 36; // approximate diameter used for head collisions
-const PLAYER_RADIUS = PLAYER_HEIGHT / 2; // for horizontal overlap tests
+const PLAYER_HEIGHT = PLAYER_COLLISION.height; // approximate height used for head collisions
+const PLAYER_RADIUS = PLAYER_COLLISION.radius; // for horizontal overlap tests
+const TAG_RADIUS = PLAYER_COLLISION.tagRadius;
 // Advanced jump tuning
 const JUMP_SUSTAIN_MS = 140; // window to sustain upward velocity (low gravity phase)
 const JUMP_LOW_GRAVITY_FACTOR = 0.55; // fraction of gravity applied while holding jump in sustain window
@@ -48,10 +50,7 @@ const JUMP_SHORT_HOP_FACTOR = 0.35; // velocity multiplier on early release
 const COYOTE_MS = 80; // grace period after leaving ground to still jump
 const JUMP_BUFFER_MS = 90; // buffer window for jump pressed slightly before landing
 
-// Player color palette (shirt/body accent base colors)
-const COLOR_PALETTE = [
-  '#2196f3', '#ff9800', '#9c27b0', '#4caf50', '#e91e63', '#ff5722', '#3f51b5', '#009688'
-];
+// Player colors map directly to headband variants.
 // Simple platform layout (x, y, width, height). y=0 is ground baseline.
 // const PLATFORMS = [
 //   { x: 0, y: 0, w: 1600, h: 40 },
@@ -114,15 +113,16 @@ function defaultPlayerState(id, name) {
     isTagger: false,
     lastTagTime: 0,
     scoreTimeTaggedMs: 0, // cumulative time being tagger (lower is better maybe) or we can invert
-  // jump / platformer auxiliary state
-  jumpHeld: false,
-  jumpStartTime: 0,
-  canVariableJump: false,
-  lastGroundedTime: Date.now(),
-  bufferedJumpTime: 0,
-  lastReceivedInputSeq: 0,
-  lastProcessedInputSeq: 0,
-  color: null, // assigned when added to room
+    // jump / platformer auxiliary state
+    jumpHeld: false,
+    jumpStartTime: 0,
+    canVariableJump: false,
+    lastGroundedTime: Date.now(),
+    bufferedJumpTime: 0,
+    lastReceivedInputSeq: 0,
+    lastProcessedInputSeq: 0,
+    color: null, // assigned when added to room
+    headbandId: null,
   };
 }
 
@@ -145,11 +145,13 @@ class GameRoom {
   addPlayer(socket, name) {
     const player = defaultPlayerState(socket.id, name);
     this.players.set(socket.id, player);
-  // assign leader if none
-  if (!this.leaderId) this.leaderId = socket.id;
-  // assign color from palette cycling
-  player.color = COLOR_PALETTE[this._colorIndex % COLOR_PALETTE.length];
-  this._colorIndex++;
+    // assign leader if none
+    if (!this.leaderId) this.leaderId = socket.id;
+    // assign a distinct headband variant from the shared palette, cycling for large rooms
+    const headband = getHeadbandByIndex(this._colorIndex);
+    player.color = headband.color;
+    player.headbandId = headband.id;
+    this._colorIndex++;
   }
 
   removePlayer(id) {
@@ -305,7 +307,6 @@ class GameRoom {
     if (this.state !== 'running') return;
     const tagger = this.players.get(this.taggerId);
     if (!tagger) return;
-    const TAG_RADIUS = 40;
     const inRangePairs = new Set();
     // Check potential transfers
     for (const player of this.players.values()) {
@@ -384,11 +385,12 @@ class GameRoom {
         vx: p.vx,
         vy: p.vy,
         lastProcessedInputSeq: p.lastProcessedInputSeq,
-  color: p.color,
-  grounded: p.isGrounded,
+        color: p.color,
+        headbandId: p.headbandId,
+        grounded: p.isGrounded,
       })),
       taggerId: this.taggerId,
-  leaderId: this.leaderId,
+      leaderId: this.leaderId,
     };
     io.to(this.code).emit('state', payload);
   }

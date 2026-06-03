@@ -1,5 +1,6 @@
 import '/socket.io/socket.io.js';
 import { SceneDecorator, ensureCtxRoundRectSupport } from './render.js';
+import { PLAYER_COLLISION } from './game-config.js';
 
 const socket = io();
 
@@ -157,12 +158,13 @@ const BASE_SPEED = 220;
 const TAGGER_SPEED_MULT = 1.08;
 const GRAVITY = 1400;
 const JUMP_VELOCITY = 720;
-const PLAYER_HEIGHT = 36;
-const PLAYER_RADIUS = PLAYER_HEIGHT / 2;
+const PLAYER_HEIGHT = PLAYER_COLLISION.height;
+const PLAYER_RADIUS = PLAYER_COLLISION.radius;
 
 const localPlayer = {
   id: null,
   x: 0, y: 0, vx: 0, vy: 0, dir: 1, isTagger: false, isGrounded: false,
+  color: null, headbandId: null,
   jumpHeld: false, canVariable: false, jumpStart: 0,
   lastGroundedTime: 0,
   bufferedJumpTime: 0
@@ -345,7 +347,8 @@ socket.on('state', s => {
     if (!localPlayer.id) {
       Object.assign(localPlayer, {
         id: authoritative.id,
-        color: authoritative.color
+        color: authoritative.color,
+        headbandId: authoritative.headbandId
       });
     }
 
@@ -357,11 +360,13 @@ socket.on('state', s => {
       dir: authoritative.dir || 1,
       isTagger: !!authoritative.isTagger,
       grounded: !!authoritative.grounded,
-      color: authoritative.color
+      color: authoritative.color,
+      headbandId: authoritative.headbandId
     };
 
     localPlayer.isTagger = latestAuthoritativeLocal.isTagger;
     localPlayer.color = latestAuthoritativeLocal.color;
+    localPlayer.headbandId = latestAuthoritativeLocal.headbandId;
 
     if (!predictionActive) {
       // Before any local input, trust server completely (no partial corrections that cause flicker)
@@ -371,6 +376,7 @@ socket.on('state', s => {
       localPlayer.vy = latestAuthoritativeLocal.vy;
       localPlayer.dir = latestAuthoritativeLocal.dir;
       localPlayer.isGrounded = latestAuthoritativeLocal.grounded;
+      localPlayer.headbandId = latestAuthoritativeLocal.headbandId;
     }
   }
 
@@ -390,6 +396,7 @@ socket.on('state', s => {
       vx: p.vx ?? 0,
       vy: p.vy ?? 0,
       color: p.color,
+      headbandId: p.headbandId,
       grounded: !!p.grounded
     });
     while (arr.length > MAX_HISTORY) arr.shift();
@@ -567,7 +574,7 @@ function draw(now = performance.now()) {
     }
 
     let sample = next;
-    let ix, iy, dir, vx, vy, name, isTagger, color, grounded;
+    let ix, iy, dir, vx, vy, name, isTagger, color, headbandId, grounded;
 
     if (renderTime > next.t) {
       const deltaMs = Math.min(renderTime - next.t, MAX_REMOTE_EXTRAP_MS);
@@ -580,6 +587,7 @@ function draw(now = performance.now()) {
       name = next.name;
       isTagger = next.isTagger;
       color = next.color;
+      headbandId = next.headbandId;
       grounded = next.grounded;
     } else if (renderTime < prev.t || prev === next) {
       sample = prev;
@@ -591,6 +599,7 @@ function draw(now = performance.now()) {
       name = sample.name;
       isTagger = sample.isTagger;
       color = sample.color;
+      headbandId = sample.headbandId;
       grounded = sample.grounded;
     } else {
       const span = Math.max(next.t - prev.t, 1);
@@ -603,6 +612,7 @@ function draw(now = performance.now()) {
       name = alpha < 0.5 ? prev.name : next.name;
       isTagger = alpha < 0.5 ? prev.isTagger : next.isTagger;
       color = alpha < 0.5 ? prev.color : next.color;
+      headbandId = alpha < 0.5 ? prev.headbandId : next.headbandId;
       grounded = alpha < 0.5 ? prev.grounded : next.grounded;
     }
 
@@ -618,6 +628,7 @@ function draw(now = performance.now()) {
       vx,
       vy,
       color,
+      headbandId,
       grounded
     });
   }
@@ -657,6 +668,7 @@ function draw(now = performance.now()) {
         vx: rp.vx,
         vy: rp.vy,
         color: rp.color,
+        headbandId: rp.headbandId,
         grounded: rp.grounded
       },
       { x: 0, y: 0 },
@@ -667,7 +679,8 @@ function draw(now = performance.now()) {
 
   // Local player rendering
   if (localPlayer.id) {
-    const color = lpServer?.color;
+    const color = lpServer?.color || localPlayer.color;
+    const headbandId = lpServer?.headbandId || localPlayer.headbandId;
 
     // Main local player render
     scene.drawPlayer(
@@ -680,6 +693,7 @@ function draw(now = performance.now()) {
         vx: localPlayer.vx,
         vy: localPlayer.vy,
         color: color,
+        headbandId,
         grounded: lpServer?.grounded ?? localPlayer.isGrounded
       },
       { x: 0, y: 0 },
@@ -753,6 +767,7 @@ function reconcileLocalPlayer(dt) {
 
   localPlayer.isTagger = auth.isTagger;
   localPlayer.color = auth.color;
+  localPlayer.headbandId = auth.headbandId;
 
   const dx = auth.x - localPlayer.x;
   const dy = auth.y - localPlayer.y;
@@ -764,6 +779,7 @@ function reconcileLocalPlayer(dt) {
     localPlayer.vy = auth.vy;
     localPlayer.dir = auth.dir;
     localPlayer.isGrounded = auth.grounded;
+    localPlayer.headbandId = auth.headbandId;
     localPlayer.canVariable = false;
     return;
   }
@@ -923,7 +939,7 @@ function updatePlayerList() {
   if (!wrap) return;
   const { players, taggerId, leaderId } = gameState;
   const key = JSON.stringify({
-    players: players.map(p => [p.id, p.name, p.color]),
+    players: players.map(p => [p.id, p.name, p.color, p.headbandId]),
     taggerId,
     leaderId,
     localId

@@ -1,3 +1,5 @@
+import { DEFAULT_HEADBAND, HEADBAND_PALETTE, RUNNER_SPRITE, getHeadbandById } from './game-config.js';
+
 const ATLAS = {
   platformTile: { x: 99, y: 71, w: 160, h: 85 },
   tree: { x: 390, y: 540, w: 293, h: 335 },
@@ -34,15 +36,11 @@ export class SceneDecorator {
     this.ctx = canvas.getContext('2d');
     this.timeStart = performance.now();
 
-    this.playerSprite = new Image();
-    this.playerSpriteLoaded = false;
-    this.playerSprite.onload = () => {
-      this.playerSpriteLoaded = true;
-    };
-    this.playerSprite.src = new URL('./assets/plumber-runner-sprite.png', import.meta.url).href;
-    this.playerSpriteFrameWidth = 24;
-    this.playerSpriteFrameHeight = 32;
-    this.playerSpriteScale = 2;
+    this.playerSprites = new Map();
+    this.playerSpriteFrameWidth = RUNNER_SPRITE.frameWidth;
+    this.playerSpriteFrameHeight = RUNNER_SPRITE.frameHeight;
+    this.playerSpriteScale = RUNNER_SPRITE.scale;
+    this.loadPlayerSprites();
 
     this.smokeSprite = new Image();
     this.smokeSpriteLoaded = false;
@@ -74,6 +72,34 @@ export class SceneDecorator {
     this.platformCanvas = document.createElement('canvas');
     this.backgroundCacheKey = '';
     this.platformCacheKey = '';
+  }
+
+  loadPlayerSprites() {
+    for (const headband of HEADBAND_PALETTE) {
+      const entry = {
+        headband,
+        image: new Image(),
+        loaded: false,
+      };
+      entry.image.onload = () => {
+        entry.loaded = true;
+      };
+      entry.image.src = new URL(`./assets/runner/${headband.asset}`, import.meta.url).href;
+      this.playerSprites.set(headband.id, entry);
+    }
+  }
+
+  getPlayerSpriteEntry(headbandId) {
+    const headband = getHeadbandById(headbandId);
+    return this.playerSprites.get(headband.id) || this.playerSprites.get(DEFAULT_HEADBAND.id);
+  }
+
+  getPlayerDrawWidth() {
+    return this.playerSpriteFrameWidth * this.playerSpriteScale;
+  }
+
+  getPlayerDrawHeight() {
+    return this.playerSpriteFrameHeight * this.playerSpriteScale;
   }
 
   update() {}
@@ -292,10 +318,10 @@ export class SceneDecorator {
       ? (runSpeed > 10 ? Math.sin(t * 15) * 2 : Math.sin(t * 3) * 1)
       : 0;
 
-    let mainColor = p.color || '#00ffff';
+    const headband = getHeadbandById(p.headbandId);
+    const mainColor = p.color || headband.color || DEFAULT_HEADBAND.color;
     let glowColor = mainColor;
     if (tagger) {
-      mainColor = '#ff0055';
       glowColor = '#ff0055';
     } else if (isLocal) {
       glowColor = '#00ff00';
@@ -305,27 +331,29 @@ export class SceneDecorator {
     ctx.translate(baseX, baseY + bob);
     if (p.dir < 0) ctx.scale(-1, 1);
 
-    if (this.playerSpriteLoaded && this.playerSprite.naturalWidth > 0) {
-      this.drawSpritePlayer(p, t, grounded, runSpeed, isLocal, tagger, glowColor);
+    const spriteEntry = this.getPlayerSpriteEntry(p.headbandId);
+    if (spriteEntry?.loaded && spriteEntry.image.naturalWidth > 0) {
+      this.drawSpritePlayer(p, t, grounded, runSpeed, isLocal, tagger, glowColor, spriteEntry);
     } else {
-      this.drawFallbackPlayer(tagger, mainColor);
+      this.drawFallbackPlayer(mainColor);
     }
 
     ctx.restore();
 
     ctx.save();
     ctx.translate(baseX, baseY + bob);
+    const drawHeight = this.getPlayerDrawHeight();
     if (tagger) {
       ctx.fillStyle = '#ff0055';
       ctx.font = '10px "Press Start 2P"';
       ctx.textAlign = 'center';
-      ctx.fillText('IT', 0, -80 - Math.abs(Math.sin(t * 10) * 5));
+      ctx.fillText('IT', 0, -drawHeight - 10 - Math.abs(Math.sin(t * 10) * 5));
     }
 
     ctx.fillStyle = '#fff';
     ctx.font = '8px "Press Start 2P"';
     ctx.textAlign = 'center';
-    ctx.fillText(p.name || '', 0, -95);
+    ctx.fillText(p.name || '', 0, -drawHeight - 24);
     ctx.restore();
   }
 
@@ -338,7 +366,7 @@ export class SceneDecorator {
     return 0;
   }
 
-  drawSpritePlayer(p, t, grounded, runSpeed, isLocal, tagger, glowColor) {
+  drawSpritePlayer(p, t, grounded, runSpeed, isLocal, tagger, glowColor, spriteEntry) {
     const ctx = this.ctx;
     const frame = this.getPlayerSpriteFrame(p, t, grounded, runSpeed);
     const sw = this.playerSpriteFrameWidth;
@@ -360,7 +388,7 @@ export class SceneDecorator {
     const previousSmoothing = ctx.imageSmoothingEnabled;
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(
-      this.playerSprite,
+      spriteEntry.image,
       frame * sw,
       0,
       sw,
@@ -373,40 +401,57 @@ export class SceneDecorator {
     ctx.imageSmoothingEnabled = previousSmoothing;
   }
 
-  drawFallbackPlayer(tagger, mainColor) {
+  drawFallbackPlayer(mainColor) {
     const ctx = this.ctx;
 
-    ctx.fillStyle = '#000';
-    ctx.strokeStyle = mainColor;
-    ctx.lineWidth = 3;
+    ctx.fillStyle = '#062f3a';
 
     ctx.beginPath();
-    ctx.roundRect(-15, -50, 30, 50, 5);
+    ctx.roundRect(-14, -31, 28, 29, 6);
     ctx.fill();
-    ctx.stroke();
 
     ctx.beginPath();
-    ctx.roundRect(-12, -68, 24, 20, 4);
+    ctx.moveTo(-12, -30);
+    ctx.lineTo(-12, -39);
+    ctx.lineTo(-4, -30);
+    ctx.closePath();
     ctx.fill();
-    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(3, -30);
+    ctx.lineTo(11, -39);
+    ctx.lineTo(13, -30);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = mainColor;
+    ctx.beginPath();
+    ctx.roundRect(-17, -28, 34, 8, 4);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-15, -25);
+    ctx.lineTo(-22, -20);
+    ctx.lineTo(-18, -15);
+    ctx.lineTo(-13, -20);
+    ctx.closePath();
+    ctx.fill();
 
     ctx.fillStyle = '#fff';
-    if (tagger) {
-      ctx.beginPath();
-      ctx.moveTo(-8, -60);
-      ctx.lineTo(-2, -58);
-      ctx.lineTo(-8, -56);
-      ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(-5, -18, 6, 7, 0, 0, Math.PI * 2);
+    ctx.ellipse(7, -18, 6, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
 
-      ctx.beginPath();
-      ctx.moveTo(8, -60);
-      ctx.lineTo(2, -58);
-      ctx.lineTo(8, -56);
-      ctx.fill();
-    } else {
-      ctx.fillRect(-8, -62, 6, 6);
-      ctx.fillRect(2, -62, 6, 6);
-    }
+    ctx.fillStyle = '#050708';
+    ctx.beginPath();
+    ctx.arc(-3, -19, 1.8, 0, Math.PI * 2);
+    ctx.arc(9, -19, 1.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.roundRect(-3, -10, 7, 4, 2);
+    ctx.fill();
   }
 }
 
