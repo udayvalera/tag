@@ -11,7 +11,21 @@ const io = new Server(httpServer, {
   cors: { origin: '*' }
 });
 
-app.use(express.static('public'));
+const noCacheHtml = 'no-store, no-cache, must-revalidate';
+app.use((req, res, next) => {
+  if (req.path === '/' || req.path.endsWith('.html')) {
+    res.setHeader('Cache-Control', noCacheHtml);
+  }
+  next();
+});
+
+app.use(express.static('public', {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', noCacheHtml);
+    }
+  }
+}));
 
 // --- Game Constants ---
 const GAME_DURATION_MS = 120_000; // configurable
@@ -78,6 +92,13 @@ const PLATFORMS = [
   { x: 850, y: 480, w: 120, h: 24 },
   { x: 1150, y: 520, w: 120, h: 24 }
 ];
+
+const WORLD_PAYLOAD = {
+  version: 1,
+  worldWidth: 1600,
+  worldHeight: 720,
+  platforms: PLATFORMS
+};
 
 function defaultPlayerState(id, name) {
   return {
@@ -367,7 +388,6 @@ class GameRoom {
   grounded: p.isGrounded,
       })),
       taggerId: this.taggerId,
-      platforms: PLATFORMS,
   leaderId: this.leaderId,
     };
     io.to(this.code).emit('state', payload);
@@ -388,11 +408,16 @@ function getRoom(code) {
   return rooms.get(code);
 }
 
+function emitWorld(socket) {
+  socket.emit('world', WORLD_PAYLOAD);
+}
+
 io.on('connection', socket => {
   socket.on('createRoom', ({ name }, cb) => {
     const room = createRoom();
     socket.join(room.code);
     room.addPlayer(socket, name);
+    emitWorld(socket);
     cb?.({ code: room.code });
   });
 
@@ -401,6 +426,7 @@ io.on('connection', socket => {
     if (!room) return cb?.({ error: 'Room not found'});
     socket.join(code);
     room.addPlayer(socket, name);
+    emitWorld(socket);
     cb?.({ ok: true });
   });
 
