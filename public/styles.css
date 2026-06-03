@@ -70,6 +70,11 @@ input {
 
 #game {
   display: block;
+  width: min(100vw, calc(100dvh * 1600 / 720));
+  height: auto;
+  max-width: 100vw;
+  max-height: 100dvh;
+  aspect-ratio: 1600 / 720;
   margin: 0 auto;
   background: var(--sky);
   border: 4px solid var(--platform);

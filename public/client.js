@@ -138,10 +138,12 @@ let gameState = {
   leaderId: null,
   serverTime: 0
 };
+const DEFAULT_WORLD_WIDTH = 1600;
+const DEFAULT_WORLD_HEIGHT = 720;
 let world = {
   platforms: [],
-  worldWidth: 1600,
-  worldHeight: 720,
+  worldWidth: DEFAULT_WORLD_WIDTH,
+  worldHeight: DEFAULT_WORLD_HEIGHT,
   version: null
 };
 let localId = null;
@@ -325,10 +327,11 @@ socket.on('connect', () => { localId = socket.id; });
 socket.on('world', payload => {
   world = {
     platforms: Array.isArray(payload?.platforms) ? payload.platforms : [],
-    worldWidth: payload?.worldWidth ?? 1600,
-    worldHeight: payload?.worldHeight ?? 720,
+    worldWidth: payload?.worldWidth ?? DEFAULT_WORLD_WIDTH,
+    worldHeight: payload?.worldHeight ?? DEFAULT_WORLD_HEIGHT,
     version: payload?.version ?? null
   };
+  syncCanvasBackingSize();
   gameState.platforms = world.platforms;
 });
 
@@ -1051,17 +1054,18 @@ elem('playerList')?.addEventListener('click', e => {
   setPlayerListExpanded(!playerListExpanded);
 });
 
-// Window resize handler for responsive canvas
-window.addEventListener('resize', () => {
-  // Maintain aspect ratio or adjust canvas size if needed
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width !== canvas.width || rect.height !== canvas.height) {
-    canvas.width = rect.width;
-    canvas.height = rect.height;
-    // Reinitialize scene if canvas size changes
+function syncCanvasBackingSize() {
+  const nextWidth = world.worldWidth || DEFAULT_WORLD_WIDTH;
+  const nextHeight = world.worldHeight || DEFAULT_WORLD_HEIGHT;
+  if (canvas.width !== nextWidth || canvas.height !== nextHeight) {
+    canvas.width = nextWidth;
+    canvas.height = nextHeight;
     scene = new SceneDecorator(canvas);
   }
-});
+}
+
+// CSS handles responsive visual scaling; the backing store stays in world units.
+window.addEventListener('resize', syncCanvasBackingSize);
 
 // Prevent context menu on canvas
 canvas.addEventListener('contextmenu', e => e.preventDefault());
