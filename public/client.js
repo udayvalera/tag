@@ -73,8 +73,8 @@ function updateLatencyDisplay() {
     else if (displayedPing < 140) cls = 'ok';
     else cls = 'bad';
   }
-  const fpsText = fpsEl.dataset.fpsText || 'FPS: --';
-  setHtmlIfChanged(fpsEl, `${fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`);
+  const fpsText = fpsEl.dataset.fpsText || 'FPS --';
+  setHtmlIfChanged(fpsEl, `${fpsText} <span class="meterDivider">/</span> PING <span class="pingValue ${cls}">${pingStr} ms</span>`);
 }
 
 setInterval(() => {
@@ -419,7 +419,9 @@ socket.on('playerLeft', ({ id }) => {
 function showStatus(code) {
   setHidden(elem('menu'), true);
   setHidden(elem('statusBar'), false);
-  setTextIfChanged(elem('roomLabel'), 'Room: ' + code);
+  const roomLabel = elem('roomLabel');
+  if (roomLabel) roomLabel.dataset.roomCode = code;
+  setTextIfChanged(roomLabel, 'ROOM ' + code);
   setHidden(elem('playerList'), false);
 }
 
@@ -695,17 +697,17 @@ function draw(now = performance.now()) {
     const cdText = elem('countdown-text');
     const cdTagger = elem('countdown-tagger');
     setTextIfChanged(cdNum, cd);
-    setTextIfChanged(cdText, 'GET READY!');
-    setHtmlIfChanged(cdTagger, `Tagger: <span class="tagger-name">${escapeHtml(taggerName)}</span>`);
+    setTextIfChanged(cdText, 'READY');
+    setHtmlIfChanged(cdTagger, `IT <span class="tagger-name">${escapeHtml(taggerName)}</span>`);
   } else {
     setHidden(elem('countdown'), true);
   }
 
   if (state === 'running') {
     const timeLeft = (gameRemainingMs / 1000).toFixed(1);
-    setHtmlIfChanged(elem('timer'), `⏰ ${timeLeft}s`);
+    setHtmlIfChanged(elem('timer'), `TIME ${timeLeft}s`);
     const taggerName = players.find(p => p.id === taggerId)?.name || 'Nobody';
-    setHtmlIfChanged(elem('tagger'), `🏷️ ${escapeHtml(taggerName)}`);
+    setHtmlIfChanged(elem('tagger'), `IT ${escapeHtml(taggerName)}`);
   }
 
   if (state === 'ended') {
@@ -721,7 +723,7 @@ function draw(now = performance.now()) {
       setHtmlIfChanged(elem('results'), sorted.map((p, index) =>
         `<div class="result-item">
           ${index + 1}. ${escapeHtml(p.name)}
-          ${p.id === taggerId ? '<span class="final-tagger">🏆 FINAL TAGGER</span>' : ''}
+          ${p.id === taggerId ? '<span class="final-tagger">FINAL IT</span>' : ''}
         </div>`
       ).join(''));
       elem('results').dataset.filled = '1';
@@ -901,7 +903,9 @@ function updateLocalPrediction(dt, platforms) {
 // Start game button (leader only)
 elem('startGameBtn').onclick = () => {
   if (!gameState.leaderId || gameState.leaderId !== localId) return;
-  socket.emit('startGame', { code: elem('roomLabel').textContent.split(': ')[1] }, (res) => {
+  const roomLabel = elem('roomLabel');
+  const code = roomLabel?.dataset.roomCode || roomLabel?.textContent.replace(/^ROOM\s+/, '');
+  socket.emit('startGame', { code }, (res) => {
     if (res?.error) alert(res.error);
   });
 };
@@ -929,9 +933,9 @@ function updatePlayerList() {
 
   const rows = players.map(p => {
     const badges = [];
-    if (p.id === leaderId) badges.push('<span class="leaderBadge">👑 LEADER</span>');
-    if (p.id === taggerId) badges.push('<span class="tagBadge">🏷️ TAGGER</span>');
-    if (p.id === localId) badges.push('<span class="selfBadge">⭐ YOU</span>');
+    if (p.id === leaderId) badges.push('<span class="leaderBadge">LEAD</span>');
+    if (p.id === taggerId) badges.push('<span class="tagBadge">IT</span>');
+    if (p.id === localId) badges.push('<span class="selfBadge">YOU</span>');
 
     const rowClass = p.id === leaderId ? 'leader' : '';
     const playerColor = p.color || '#95a5a6';
@@ -944,7 +948,7 @@ function updatePlayerList() {
     `;
   }).join('');
 
-  setHtmlIfChanged(wrap, `<h3>👥 PLAYERS (${players.length})</h3>${rows}`);
+  setHtmlIfChanged(wrap, `<h3>RUNNERS (${players.length})</h3>${rows}`);
 }
 
 // Window resize handler for responsive canvas
@@ -976,16 +980,15 @@ let frameCount = 0;
 let lastFPSUpdate = performance.now();
 const fpsElement = document.createElement('div');
 fpsElement.id = 'fpsLatency';
-fpsElement.style.cssText = 'position:fixed;top:10px;right:10px;color:#fff;font-size:12px;z-index:1000;pointer-events:none;text-shadow:1px 1px 0 #000;font-family:monospace;';
-fpsElement.dataset.fpsText = 'FPS: --';
-fpsElement.innerHTML = 'FPS: -- | PING: <span class="pingValue">-- ms</span>';
+fpsElement.dataset.fpsText = 'FPS --';
+fpsElement.innerHTML = 'FPS -- <span class="meterDivider">/</span> PING <span class="pingValue">-- ms</span>';
 document.body.appendChild(fpsElement);
 
 setInterval(() => {
   const now = performance.now();
   if (now - lastFPSUpdate >= 1000) {
     const fps = Math.round((frameCount * 1000) / (now - lastFPSUpdate));
-    fpsElement.dataset.fpsText = `FPS: ${fps}`;
+    fpsElement.dataset.fpsText = `FPS ${fps}`;
     // refresh combined display preserving current ping
     const pingSpan = fpsElement.querySelector('.pingValue');
     const currentPing = pingSpan ? pingSpan.textContent.replace(/[^0-9-]/g, '') : (displayedPing == null ? '--' : displayedPing);
@@ -996,7 +999,7 @@ setInterval(() => {
       else if (displayedPing < 140) cls = 'ok';
       else cls = 'bad';
     }
-    setHtmlIfChanged(fpsElement, `${fpsElement.dataset.fpsText} | PING: <span class="pingValue ${cls}">${pingStr} ms</span>`);
+    setHtmlIfChanged(fpsElement, `${fpsElement.dataset.fpsText} <span class="meterDivider">/</span> PING <span class="pingValue ${cls}">${pingStr} ms</span>`);
     frameCount = 0;
     lastFPSUpdate = now;
   }
