@@ -11,6 +11,20 @@ export const PLAYER_COLLISION = Object.freeze({
   tagRadius: 32,
 });
 
+export const MOTION_LINES_SPRITE = Object.freeze({
+  asset: 'wind-motion-lines-sprite.png',
+  frameWidth: 32,
+  frameHeight: 20,
+  frameCount: 8,
+  scale: 1,
+  alpha: 0.74,
+});
+
+export const PARTICLE_TUNING = Object.freeze({
+  maxPuffs: 18,
+  runIntervalMs: 125,
+});
+
 export const HEADBAND_PALETTE = Object.freeze([
   Object.freeze({
     id: 'electric-blue',

@@ -1,4 +1,4 @@
-import { DEFAULT_HEADBAND, HEADBAND_PALETTE, RUNNER_SPRITE, getHeadbandById } from './game-config.js';
+import { DEFAULT_HEADBAND, HEADBAND_PALETTE, MOTION_LINES_SPRITE, RUNNER_SPRITE, getHeadbandById } from './game-config.js';
 
 const ATLAS = {
   platformTile: { x: 99, y: 71, w: 160, h: 85 },
@@ -47,10 +47,10 @@ export class SceneDecorator {
     this.smokeSprite.onload = () => {
       this.smokeSpriteLoaded = true;
     };
-    this.smokeSprite.src = new URL('./assets/plumber-smoke-sprite.png', import.meta.url).href;
-    this.smokeSpriteFrameWidth = 32;
-    this.smokeSpriteFrameHeight = 32;
-    this.smokeSpriteFrameCount = 8;
+    this.smokeSprite.src = new URL(`./assets/${MOTION_LINES_SPRITE.asset}`, import.meta.url).href;
+    this.smokeSpriteFrameWidth = MOTION_LINES_SPRITE.frameWidth;
+    this.smokeSpriteFrameHeight = MOTION_LINES_SPRITE.frameHeight;
+    this.smokeSpriteFrameCount = MOTION_LINES_SPRITE.frameCount;
 
     this.backgroundImage = new Image();
     this.backgroundImageLoaded = false;
@@ -277,12 +277,13 @@ export class SceneDecorator {
     const sw = this.smokeSpriteFrameWidth;
     const sh = this.smokeSpriteFrameHeight;
     const frame = Math.max(0, Math.min(this.smokeSpriteFrameCount - 1, puff.frame | 0));
-    const scale = puff.scale ?? 1.35;
+    const scale = puff.scale ?? MOTION_LINES_SPRITE.scale;
     const dw = Math.round(sw * scale);
     const dh = Math.round(sh * scale);
     const baseX = Math.round((puff.x ?? 0) - (camera.x ?? 0));
     const baseY = Math.round(this.canvas.height - (puff.y ?? 0));
-    const alpha = Math.max(0, Math.min(1, puff.alpha ?? 1));
+    const baseAlpha = puff.baseAlpha ?? MOTION_LINES_SPRITE.alpha;
+    const alpha = Math.max(0, Math.min(1, (puff.alpha ?? 1) * baseAlpha));
 
     ctx.save();
     ctx.translate(baseX, baseY);
@@ -290,7 +291,7 @@ export class SceneDecorator {
     ctx.globalAlpha = alpha;
 
     const previousSmoothing = ctx.imageSmoothingEnabled;
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = true;
     ctx.drawImage(
       this.smokeSprite,
       frame * sw,

@@ -1,6 +1,6 @@
 import '/socket.io/socket.io.js';
 import { SceneDecorator, ensureCtxRoundRectSupport } from './render.js';
-import { PLAYER_COLLISION } from './game-config.js';
+import { MOTION_LINES_SPRITE, PARTICLE_TUNING, PLAYER_COLLISION } from './game-config.js';
 
 const socket = io();
 
@@ -172,9 +172,9 @@ const localPlayer = {
 let predictionActive = false; // remain false until user moves / jumps to avoid idle flicker
 const smokePuffs = [];
 const runSmokeLastAt = new Map();
-const MAX_SMOKE_PUFFS = 24;
-const SMOKE_FRAME_COUNT = 8;
-const RUN_SMOKE_INTERVAL_MS = 90;
+const MAX_SMOKE_PUFFS = PARTICLE_TUNING.maxPuffs;
+const SMOKE_FRAME_COUNT = MOTION_LINES_SPRITE.frameCount;
+const RUN_SMOKE_INTERVAL_MS = PARTICLE_TUNING.runIntervalMs;
 let lastRenderDelayMs = BASE_INTERP_DELAY_MS;
 let latestAuthoritativeLocal = null;
 let serverClockOffsetMs = 0;
@@ -194,19 +194,20 @@ function spawnSmokePuff({
   x,
   y,
   dir = 1,
-  scale = 1.35,
-  life = 280,
+  scale = MOTION_LINES_SPRITE.scale,
+  life = 180,
   vx = 0,
-  vy = 0
+  vy = 0,
+  baseAlpha = MOTION_LINES_SPRITE.alpha
 }) {
   if (!ENHANCED_PARTICLES) return;
-  if (![x, y, scale, life, vx, vy].every(Number.isFinite)) return;
+  if (![x, y, scale, life, vx, vy, baseAlpha].every(Number.isFinite)) return;
 
   while (smokePuffs.length >= MAX_SMOKE_PUFFS) {
     smokePuffs.shift();
   }
 
-  smokePuffs.push({ x, y, dir, scale, life, vx, vy, t: 0 });
+  smokePuffs.push({ x, y, dir, scale, life, vx, vy, baseAlpha, t: 0 });
 }
 
 function spawnRunSmoke(id, player, now) {
@@ -214,7 +215,7 @@ function spawnRunSmoke(id, player, now) {
 
   const speed = Math.abs(player.vx ?? 0);
   const grounded = player.grounded ?? player.isGrounded;
-  if (!grounded || speed < 45) {
+  if (!grounded || speed < 60) {
     runSmokeLastAt.delete(id);
     return;
   }
@@ -225,48 +226,60 @@ function spawnRunSmoke(id, player, now) {
 
   const dir = player.dir || 1;
   spawnSmokePuff({
-    x: player.x - dir * 20,
-    y: player.y + 2,
+    x: player.x - dir * 16,
+    y: player.y + 8,
     dir,
-    scale: 1.15,
-    life: 250,
-    vx: -dir * 24,
-    vy: 8
+    scale: 0.98,
+    life: 175,
+    vx: -dir * 22,
+    vy: 2,
+    baseAlpha: 0.72
   });
 }
 
 function spawnJumpSmoke(x, y, dir) {
   spawnSmokePuff({
-    x,
-    y: y + 2,
+    x: x - (dir || 1) * 10,
+    y: y + 6,
     dir,
-    scale: 1.65,
-    life: 300,
-    vx: -(dir || 1) * 10,
-    vy: 12
+    scale: 0.9,
+    life: 155,
+    vx: -(dir || 1) * 16,
+    vy: 3,
+    baseAlpha: 0.58
   });
 }
 
 function spawnLandingSmoke(x, y, dir) {
+  const facing = dir || 1;
   spawnSmokePuff({
-    x,
-    y: y + 2,
-    dir,
-    scale: 1.75,
-    life: 320,
-    vx: -(dir || 1) * 8,
-    vy: 10
+    x: x - facing * 11,
+    y: y + 5,
+    dir: facing,
+    scale: 0.96,
+    life: 170,
+    vx: -facing * 15,
+    vy: 1,
+    baseAlpha: 0.62
+  });
+  spawnSmokePuff({
+    x: x + facing * 8,
+    y: y + 4,
+    dir: -facing,
+    scale: 0.8,
+    life: 140,
+    vx: facing * 12,
+    vy: 1,
+    baseAlpha: 0.46
   });
 }
 
 function spawnTagSmoke(x, y) {
   const pattern = [
-    { dx: -24, dy: 4, dir: 1, scale: 1.15, vx: -80, vy: 26 },
-    { dx: -10, dy: 8, dir: 1, scale: 1.35, vx: -42, vy: 40 },
-    { dx: 8, dy: 10, dir: -1, scale: 1.45, vx: 44, vy: 44 },
-    { dx: 24, dy: 5, dir: -1, scale: 1.15, vx: 82, vy: 28 },
-    { dx: 0, dy: 20, dir: 1, scale: 1.25, vx: 0, vy: 72 },
-    { dx: -2, dy: -2, dir: -1, scale: 1.55, vx: 0, vy: 18 }
+    { dx: -18, dy: 7, dir: 1, scale: 0.98, vx: -58, vy: 10, baseAlpha: 0.66 },
+    { dx: -5, dy: 15, dir: 1, scale: 0.82, vx: -32, vy: 18, baseAlpha: 0.5 },
+    { dx: 12, dy: 9, dir: -1, scale: 0.96, vx: 48, vy: 12, baseAlpha: 0.62 },
+    { dx: 5, dy: 24, dir: -1, scale: 0.8, vx: 22, vy: 24, baseAlpha: 0.46 }
   ];
 
   for (const puff of pattern) {
@@ -275,9 +288,10 @@ function spawnTagSmoke(x, y) {
       y: y + puff.dy,
       dir: puff.dir,
       scale: puff.scale,
-      life: 300,
+      life: 185,
       vx: puff.vx,
-      vy: puff.vy
+      vy: puff.vy,
+      baseAlpha: puff.baseAlpha
     });
   }
 }
@@ -299,7 +313,9 @@ function updateAndDrawSmoke(dt) {
     }
 
     const frame = Math.min(SMOKE_FRAME_COUNT - 1, Math.floor(age * SMOKE_FRAME_COUNT));
-    const alpha = age > 0.78 ? Math.max(0, (1 - age) / 0.22) : 1;
+    const fadeIn = Math.min(1, age / 0.12);
+    const fadeOut = age > 0.62 ? Math.max(0, (1 - age) / 0.38) : 1;
+    const alpha = fadeIn * fadeOut;
     scene.drawSmokePuff({ ...p, frame, alpha }, { x: 0, y: 0 });
   }
 }
