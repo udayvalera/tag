@@ -133,10 +133,12 @@ let gameState = {
   platforms: [],
   state: 'waiting',
   taggerId: null,
-  countdownRemainingMs: 0,
-  gameRemainingMs: 0,
+  gameStartAt: null,
+  gameEndsAt: null,
   leaderId: null,
-  serverTime: 0
+  serverTime: 0,
+  powerUps: [],
+  effects: {}
 };
 const DEFAULT_WORLD_WIDTH = 1600;
 const DEFAULT_WORLD_HEIGHT = 720;
@@ -148,12 +150,14 @@ let world = {
 };
 let localId = null;
 let inputSeq = 0;
-const pendingInputs = []; // inputs not yet confirmed by server
+let currentRoomCode = null;
 const remoteHistory = new Map(); // playerId -> array of snapshots for interpolation
 const BASE_INTERP_DELAY_MS = 80; // default render delay in ms (trimmed for snappier feel)
 const MIN_INTERP_DELAY_MS = 45; // clamp for low-ping sessions so remotes stay <50ms behind
 const MAX_REMOTE_EXTRAP_MS = 40; // allow gentle extrapolation when new snapshots haven't arrived
 const MAX_HISTORY = 45;
+const PLAYER_STATE_SEND_INTERVAL_MS = 1000 / 30;
+const TAG_ATTEMPT_INTERVAL_MS = 140;
 
 // Physics constants (must mirror server)
 const BASE_SPEED = 220;
@@ -171,16 +175,17 @@ const localPlayer = {
   lastGroundedTime: 0,
   bufferedJumpTime: 0
 };
-let predictionActive = false; // remain false until user moves / jumps to avoid idle flicker
+let predictionActive = false;
 const smokePuffs = [];
 const runSmokeLastAt = new Map();
 const MAX_SMOKE_PUFFS = PARTICLE_TUNING.maxPuffs;
 const SMOKE_FRAME_COUNT = MOTION_LINES_SPRITE.frameCount;
 const RUN_SMOKE_INTERVAL_MS = PARTICLE_TUNING.runIntervalMs;
 let lastRenderDelayMs = BASE_INTERP_DELAY_MS;
-let latestAuthoritativeLocal = null;
 let serverClockOffsetMs = 0;
 let hasServerClockOffset = false;
+let lastPlayerStateSentAt = 0;
+let lastTagAttemptAt = 0;
 
 // Mirror advanced jump tuning (keep in sync with server where possible)
 const JUMP_SUSTAIN_MS = 140;
@@ -335,106 +340,221 @@ socket.on('world', payload => {
   gameState.platforms = world.platforms;
 });
 
-socket.on('state', s => {
-  if (typeof s.serverTime === 'number') {
-    const sampleOffset = s.serverTime - performance.now();
-    serverClockOffsetMs = hasServerClockOffset
-      ? serverClockOffsetMs * 0.9 + sampleOffset * 0.1
-      : sampleOffset;
-    hasServerClockOffset = true;
+function syncServerClock(serverTime) {
+  if (typeof serverTime !== 'number') return;
+  const sampleOffset = serverTime - performance.now();
+  serverClockOffsetMs = hasServerClockOffset
+    ? serverClockOffsetMs * 0.9 + sampleOffset * 0.1
+    : sampleOffset;
+  hasServerClockOffset = true;
+}
+
+function syncedServerNow(now = performance.now()) {
+  return hasServerClockOffset ? now + serverClockOffsetMs : Date.now();
+}
+
+function getDerivedTiming(now = performance.now()) {
+  const serverNow = syncedServerNow(now);
+  let state = gameState.state || 'waiting';
+
+  if (state === 'countdown' && gameState.gameStartAt && serverNow >= gameState.gameStartAt) {
+    state = 'running';
+  }
+  if ((state === 'countdown' || state === 'running') && gameState.gameEndsAt && serverNow >= gameState.gameEndsAt) {
+    state = 'ended';
   }
 
-  gameState = {
-    ...s,
-    platforms: Array.isArray(s.platforms) ? s.platforms : world.platforms
+  return {
+    state,
+    countdownRemainingMs: state === 'countdown' && gameState.gameStartAt
+      ? Math.max(0, gameState.gameStartAt - serverNow)
+      : 0,
+    gameRemainingMs: state === 'running' && gameState.gameEndsAt
+      ? Math.max(0, gameState.gameEndsAt - serverNow)
+      : 0,
+    serverNow
   };
+}
+
+function applyDerivedState(state) {
+  if (gameState.state === state) return;
+  gameState.state = state;
+  if (state !== 'ended') {
+    const results = elem('results');
+    if (results) results.dataset.filled = '';
+  }
+  syncHudState(state);
+  updatePlayerList();
+  updateStartButton();
+}
+
+function markCurrentTagger() {
+  for (const player of gameState.players) {
+    player.isTagger = player.id === gameState.taggerId;
+  }
+  if (localPlayer.id) {
+    localPlayer.isTagger = localPlayer.id === gameState.taggerId;
+  }
+}
+
+function getPlayerMeta(id) {
+  return gameState.players.find(player => player.id === id);
+}
+
+function pushRemoteSnapshot(id, snapshot) {
+  if (!id || id === localId) return;
+
+  const meta = getPlayerMeta(id);
+  if (!remoteHistory.has(id)) remoteHistory.set(id, []);
+  const arr = remoteHistory.get(id);
+  arr.push({
+    t: snapshot.serverTime || gameState.serverTime || Date.now(),
+    x: snapshot.x,
+    y: snapshot.y,
+    isTagger: id === gameState.taggerId,
+    name: snapshot.name || meta?.name || 'Player',
+    dir: snapshot.dir || meta?.dir || 1,
+    vx: snapshot.vx ?? meta?.vx ?? 0,
+    vy: snapshot.vy ?? meta?.vy ?? 0,
+    color: snapshot.color || meta?.color,
+    headbandId: snapshot.headbandId || meta?.headbandId,
+    grounded: !!(snapshot.grounded ?? meta?.grounded)
+  });
+  while (arr.length > MAX_HISTORY) arr.shift();
+}
+
+function seedLocalPlayerFromRoomState(player) {
+  if (!player) return;
+
+  const firstSeedForSocket = localPlayer.id !== player.id;
+  Object.assign(localPlayer, {
+    id: player.id,
+    color: player.color,
+    headbandId: player.headbandId,
+    isTagger: player.id === gameState.taggerId
+  });
+
+  if (firstSeedForSocket) {
+    localPlayer.x = player.x;
+    localPlayer.y = player.y;
+    localPlayer.vx = player.vx ?? 0;
+    localPlayer.vy = player.vy ?? 0;
+    localPlayer.dir = player.dir || 1;
+    localPlayer.isGrounded = !!player.grounded;
+    localPlayer.canVariable = false;
+    localPlayer.lastGroundedTime = performance.now();
+    predictionActive = true;
+  }
+}
+
+function handleRoomState(s) {
+  if (!s || typeof s !== 'object') return;
+  syncServerClock(s.serverTime);
+
+  const players = Array.isArray(s.players)
+    ? s.players.map(player => ({
+      ...player,
+      isTagger: player.id === s.taggerId
+    }))
+    : [];
+
+  gameState = {
+    ...gameState,
+    ...s,
+    players,
+    platforms: world.platforms
+  };
+  markCurrentTagger();
 
   if (!window.__firstStateLogged) {
-    console.log('[DEBUG:first-state]', {
-      players: s.players.map(p => ({ id: p.id, x: p.x, y: p.y, grounded: p.grounded, tagger: p.isTagger })),
+    console.log('[DEBUG:first-room-state]', {
+      players: players.map(p => ({ id: p.id, x: p.x, y: p.y, grounded: p.grounded, tagger: p.isTagger })),
       platforms: gameState.platforms?.length,
       state: s.state,
       serverTime: s.serverTime
     });
     window.__firstStateLogged = true;
   }
-  syncHudState(gameState.state);
-  updatePlayerList();
-  updateStartButton();
 
-  const authoritative = s.players.find(p => p.id === localId);
-  if (authoritative) {
-    if (!localPlayer.id) {
-      Object.assign(localPlayer, {
-        id: authoritative.id,
-        color: authoritative.color,
-        headbandId: authoritative.headbandId
-      });
-    }
-
-    latestAuthoritativeLocal = {
-      x: authoritative.x,
-      y: authoritative.y,
-      vx: authoritative.vx ?? 0,
-      vy: authoritative.vy ?? 0,
-      dir: authoritative.dir || 1,
-      isTagger: !!authoritative.isTagger,
-      grounded: !!authoritative.grounded,
-      color: authoritative.color,
-      headbandId: authoritative.headbandId
-    };
-
-    localPlayer.isTagger = latestAuthoritativeLocal.isTagger;
-    localPlayer.color = latestAuthoritativeLocal.color;
-    localPlayer.headbandId = latestAuthoritativeLocal.headbandId;
-
-    if (!predictionActive) {
-      // Before any local input, trust server completely (no partial corrections that cause flicker)
-      localPlayer.x = latestAuthoritativeLocal.x;
-      localPlayer.y = latestAuthoritativeLocal.y;
-      localPlayer.vx = latestAuthoritativeLocal.vx;
-      localPlayer.vy = latestAuthoritativeLocal.vy;
-      localPlayer.dir = latestAuthoritativeLocal.dir;
-      localPlayer.isGrounded = latestAuthoritativeLocal.grounded;
-      localPlayer.headbandId = latestAuthoritativeLocal.headbandId;
-    }
-  }
+  seedLocalPlayerFromRoomState(players.find(p => p.id === localId));
 
   const activeRemoteIds = new Set();
-  for (const p of s.players) {
+  for (const p of players) {
     if (p.id === localId) continue;
     activeRemoteIds.add(p.id);
-    if (!remoteHistory.has(p.id)) remoteHistory.set(p.id, []);
-    const arr = remoteHistory.get(p.id);
-    arr.push({
-      t: s.serverTime,
-      x: p.x,
-      y: p.y,
-      isTagger: p.isTagger,
-      name: p.name,
-      dir: p.dir || 1,
-      vx: p.vx ?? 0,
-      vy: p.vy ?? 0,
-      color: p.color,
-      headbandId: p.headbandId,
-      grounded: !!p.grounded
-    });
-    while (arr.length > MAX_HISTORY) arr.shift();
+    pushRemoteSnapshot(p.id, { ...p, serverTime: s.serverTime });
   }
 
   for (const id of remoteHistory.keys()) {
     if (!activeRemoteIds.has(id)) remoteHistory.delete(id);
   }
+
+  const timing = getDerivedTiming();
+  syncHudState(timing.state);
+  updatePlayerList();
+  updateStartButton();
+}
+
+socket.on('roomState', handleRoomState);
+
+socket.on('playerState', update => {
+  if (!update || update.id === localId) return;
+  syncServerClock(update.serverTime);
+
+  const player = getPlayerMeta(update.id);
+  if (!player) return;
+
+  player.x = update.x;
+  player.y = update.y;
+  player.vx = update.vx ?? 0;
+  player.vy = update.vy ?? 0;
+  player.dir = update.dir || player.dir || 1;
+  player.grounded = !!update.grounded;
+  player.isTagger = player.id === gameState.taggerId;
+
+  pushRemoteSnapshot(update.id, {
+    ...update,
+    name: player.name,
+    color: player.color,
+    headbandId: player.headbandId
+  });
 });
 
-socket.on('tag', ({ taggerId }) => {
+socket.on('tag', ({ taggerId, serverTime }) => {
+  syncServerClock(serverTime);
   gameState.taggerId = taggerId;
+  markCurrentTagger();
+  updatePlayerList();
+
   if (ENHANCED_PARTICLES) {
-    const taggerPlayer = gameState.players.find(p => p.id === taggerId);
+    const taggerPlayer = taggerId === localId ? localPlayer : gameState.players.find(p => p.id === taggerId);
     if (taggerPlayer) {
       spawnTagSmoke(taggerPlayer.x, taggerPlayer.y);
     }
   }
+});
+
+socket.on('effectApplied', ({ playerId, effect, serverTime }) => {
+  syncServerClock(serverTime);
+  if (!playerId || !effect) return;
+
+  const player = getPlayerMeta(playerId);
+  if (player) {
+    player.effects = Array.isArray(player.effects) ? player.effects : [];
+    player.effects.push(effect);
+  }
+  gameState.effects = {
+    ...(gameState.effects || {}),
+    [playerId]: [...(gameState.effects?.[playerId] || []), effect]
+  };
+});
+
+socket.on('roomClosed', ({ reason } = {}) => {
+  currentRoomCode = null;
+  applyDerivedState('ended');
+  setHidden(elem('gameOver'), false);
+  setHtmlIfChanged(elem('results'), `<div class="result-item">Room closed${reason ? `: ${escapeHtml(reason)}` : ''}</div>`);
+  elem('results').dataset.filled = '1';
 });
 
 socket.on('playerLeft', ({ id }) => {
@@ -444,6 +564,7 @@ socket.on('playerLeft', ({ id }) => {
 });
 
 function showStatus(code) {
+  currentRoomCode = code;
   setHidden(elem('menu'), true);
   setHidden(elem('statusBar'), false);
   const roomLabel = elem('roomLabel');
@@ -494,39 +615,65 @@ function isJumpKey(code) {
 function sendInput() {
   const jumpHeld = !!(keys['Space'] || keys['ArrowUp'] || keys['KeyW']);
   const now = performance.now();
-  const payload = {
-    left: !!(keys['ArrowLeft'] || keys['KeyA']),
-    right: !!(keys['ArrowRight'] || keys['KeyD']),
-    jump: jumpHeld,
-    jumpPressed: justPressedJump,
-    jumpReleased: justReleasedJump,
-    seq: ++inputSeq
-  };
 
   // Approx dt since last input for prediction step (fallback ~16ms)
-  const dt = lastInputTime ? (now - lastInputTime) / 1000 : 0.016;
-  payload.dt = dt;
   lastInputTime = now;
 
-  // Predict locally immediately
-  socket.emit('input', {
-    left: payload.left,
-    right: payload.right,
-    jump: payload.jump,
-    jumpPressed: payload.jumpPressed,
-    jumpReleased: payload.jumpReleased,
-    seq: payload.seq,
-  });
+  if (jumpHeld && !predictionActive && localPlayer.id) predictionActive = true;
 
   justPressedJump = false;
   justReleasedJump = false;
+}
+
+function compactNumber(value) {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
+}
+
+function sendLocalPlayerState(now) {
+  if (!currentRoomCode || !localPlayer.id || !socket.connected) return;
+  if (now - lastPlayerStateSentAt < PLAYER_STATE_SEND_INTERVAL_MS) return;
+
+  lastPlayerStateSentAt = now;
+  socket.emit('playerState', {
+    x: compactNumber(localPlayer.x),
+    y: compactNumber(localPlayer.y),
+    vx: compactNumber(localPlayer.vx),
+    vy: compactNumber(localPlayer.vy),
+    dir: localPlayer.dir < 0 ? -1 : 1,
+    grounded: !!localPlayer.isGrounded,
+    seq: ++inputSeq,
+    clientTime: compactNumber(now)
+  });
+}
+
+function maybeEmitTagAttempt(renderedPlayers, now, state) {
+  if (state !== 'running') return;
+  if (!localPlayer.id || gameState.taggerId !== localPlayer.id) return;
+  if (!socket.connected || now - lastTagAttemptAt < TAG_ATTEMPT_INTERVAL_MS) return;
+
+  const tagRadiusSq = PLAYER_COLLISION.tagRadius * PLAYER_COLLISION.tagRadius;
+  for (const [targetId, remotePlayer] of renderedPlayers) {
+    const dx = remotePlayer.x - localPlayer.x;
+    const dy = remotePlayer.y - localPlayer.y;
+    if (dx * dx + dy * dy <= tagRadiusSq) {
+      lastTagAttemptAt = now;
+      socket.emit('tagPlayer', {
+        targetId,
+        clientTime: compactNumber(now)
+      });
+      return;
+    }
+  }
 }
 
 // Render loop
 function draw(now = performance.now()) {
   requestAnimationFrame(draw);
   frameCount++;
-  const { players, state, countdownRemainingMs, gameRemainingMs, taggerId } = gameState;
+  const timing = getDerivedTiming(now);
+  applyDerivedState(timing.state);
+  const { players, taggerId } = gameState;
+  const { state, countdownRemainingMs, gameRemainingMs } = timing;
   const platforms = world.platforms.length ? world.platforms : (gameState.platforms || []);
   const dtBg = lastBgTime ? Math.min((now - lastBgTime) / 1000, 0.05) : 1 / 60;
   lastBgTime = now;
@@ -535,9 +682,9 @@ function draw(now = performance.now()) {
   scene.drawBackground();
   syncHudState(state);
 
-  if (localPlayer.id && predictionActive) {
-    updateLocalPrediction(dtBg, platforms);
-    reconcileLocalPlayer(dtBg);
+  if (localPlayer.id) {
+    updateLocalPrediction(dtBg, platforms, state);
+    sendLocalPlayerState(now);
   }
 
   // Debug platform rendering
@@ -645,7 +792,7 @@ function draw(now = performance.now()) {
       x: clampedX,
       y: clampedY,
       name,
-      isTagger,
+      isTagger: p.id === taggerId,
       dir,
       vx,
       vy,
@@ -654,6 +801,8 @@ function draw(now = performance.now()) {
       grounded
     });
   }
+
+  maybeEmitTagAttempt(rendered, now, state);
 
   for (const [id, rp] of rendered) {
     spawnRunSmoke(id, rp, now);
@@ -667,7 +816,7 @@ function draw(now = performance.now()) {
       dir: localPlayer.dir,
       vx: localPlayer.vx,
       vy: localPlayer.vy,
-      grounded: lpServer?.grounded ?? localPlayer.isGrounded
+      grounded: localPlayer.isGrounded
     }, now);
   }
 
@@ -716,7 +865,7 @@ function draw(now = performance.now()) {
         vy: localPlayer.vy,
         color: color,
         headbandId,
-        grounded: lpServer?.grounded ?? localPlayer.isGrounded
+        grounded: localPlayer.isGrounded
       },
       { x: 0, y: 0 },
       true,
@@ -773,8 +922,8 @@ function draw(now = performance.now()) {
       `STATE: ${state}`,
       `PLAYERS: ${gameState.players.length} (rendered remotes: ${[...remoteHistory.keys()].length})`,
       `PLATFORMS: ${platforms?.length ?? 0}`,
-      lp ? `LOCAL AUTH x:${lp.x.toFixed(1)} y:${lp.y.toFixed(1)} vy:${(lp.vy || 0).toFixed(1)} g:${lp.grounded}` : 'LOCAL AUTH: none',
-      localPlayer.id ? `LOCAL PRED x:${localPlayer.x.toFixed(1)} y:${localPlayer.y.toFixed(1)} g:${localPlayer.isGrounded}` : 'LOCAL PRED: none',
+      lp ? `LOCAL META x:${lp.x.toFixed(1)} y:${lp.y.toFixed(1)} vy:${(lp.vy || 0).toFixed(1)} g:${lp.grounded}` : 'LOCAL META: none',
+      localPlayer.id ? `LOCAL x:${localPlayer.x.toFixed(1)} y:${localPlayer.y.toFixed(1)} g:${localPlayer.isGrounded}` : 'LOCAL: none',
       `TAGGER: ${gameState.taggerId || 'none'}`,
       `PING: ${displayedPing ?? '--'} ms`,
       `RENDER DELAY: ${lastRenderDelayMs.toFixed(1)} ms`,
@@ -783,47 +932,17 @@ function draw(now = performance.now()) {
   }
 }
 
-function reconcileLocalPlayer(dt) {
-  const auth = latestAuthoritativeLocal;
-  if (!auth || !predictionActive) return;
-
-  localPlayer.isTagger = auth.isTagger;
-  localPlayer.color = auth.color;
-  localPlayer.headbandId = auth.headbandId;
-
-  const dx = auth.x - localPlayer.x;
-  const dy = auth.y - localPlayer.y;
-
-  if (Math.abs(dx) > 160 || Math.abs(dy) > 220) {
-    localPlayer.x = auth.x;
-    localPlayer.y = auth.y;
-    localPlayer.vx = auth.vx;
-    localPlayer.vy = auth.vy;
-    localPlayer.dir = auth.dir;
-    localPlayer.isGrounded = auth.grounded;
-    localPlayer.headbandId = auth.headbandId;
-    localPlayer.canVariable = false;
+function updateLocalPrediction(dt, platforms, state) {
+  if (state === 'countdown') {
+    localPlayer.vx = 0;
+    localPlayer.vy = 0;
+    pendingPredictJumpPressed = false;
+    pendingPredictJumpReleased = false;
+    localPlayer.bufferedJumpTime = 0;
+    syncLocalPlayerMetadata();
     return;
   }
 
-  const correction = 1 - Math.exp(-10 * Math.min(dt, 0.05));
-  localPlayer.x += dx * correction;
-  localPlayer.y += dy * correction;
-
-  const movingHorizontally = keys['ArrowLeft'] || keys['KeyA'] || keys['ArrowRight'] || keys['KeyD'];
-  if (!movingHorizontally) {
-    localPlayer.vx = auth.vx;
-    localPlayer.dir = auth.dir;
-  }
-
-  if (Math.abs(dy) < 4 && auth.grounded) {
-    localPlayer.isGrounded = true;
-    localPlayer.vy = auth.vy;
-    localPlayer.canVariable = false;
-  }
-}
-
-function updateLocalPrediction(dt, platforms) {
   const wasGrounded = localPlayer.isGrounded;
 
   // Horizontal movement
@@ -936,6 +1055,20 @@ function updateLocalPrediction(dt, platforms) {
   // Reset one-shot prediction flags locally AFTER using them.
   pendingPredictJumpPressed = false;
   pendingPredictJumpReleased = false;
+  syncLocalPlayerMetadata();
+}
+
+function syncLocalPlayerMetadata() {
+  const player = getPlayerMeta(localPlayer.id);
+  if (!player) return;
+
+  player.x = localPlayer.x;
+  player.y = localPlayer.y;
+  player.vx = localPlayer.vx;
+  player.vy = localPlayer.vy;
+  player.dir = localPlayer.dir;
+  player.grounded = localPlayer.isGrounded;
+  player.isTagger = localPlayer.id === gameState.taggerId;
 }
 
 // Start game button (leader only)

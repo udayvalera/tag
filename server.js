@@ -29,64 +29,43 @@ app.use(express.static('public', {
 }));
 
 // --- Game Constants ---
-const GAME_DURATION_MS = 120_000; // configurable
+const GAME_DURATION_MS = 120_000;
 const PRE_GAME_COUNTDOWN_MS = 3000;
-const TICK_RATE = 60; // server authoritative tick in Hz
-const TAG_COOLDOWN_MS = 2000; // (legacy) time cooldown no longer used; kept for config reference
-const TAGGER_SPEED_MULT = 1.08; // slight edge
-const BASE_SPEED = 220; // units per second
-// Tuned jump: increase vertical reach so players can climb successive platforms naturally.
-// With JUMP_VELOCITY 720 and GRAVITY 1400 => apex time ~0.51s, total airtime ~1.02s, height gain ~185.
-// Platform vertical gaps require ~174 max step, so this gives slight buffer without feeling floaty.
-const JUMP_VELOCITY = 720; // units/s
-const GRAVITY = 1400; // units/s^2 (slightly higher for a crisp fall)
-const PLAYER_HEIGHT = PLAYER_COLLISION.height; // approximate height used for head collisions
-const PLAYER_RADIUS = PLAYER_COLLISION.radius; // for horizontal overlap tests
+const MAX_PLAYERS_PER_ROOM = 8;
+const PLAYER_STATE_MIN_INTERVAL_MS = 30;
+const TAG_ATTEMPT_MIN_INTERVAL_MS = 120;
+const TAG_VALIDATION_GRACE_PX = 96;
+const ENDED_ROOM_TTL_MS = 10 * 60 * 1000;
+const ROOM_CLEANUP_INTERVAL_MS = 60 * 1000;
+const MAX_ABS_VELOCITY = 2400;
+const EFFECT_DEFAULT_MS = 8000;
 const TAG_RADIUS = PLAYER_COLLISION.tagRadius;
-// Advanced jump tuning
-const JUMP_SUSTAIN_MS = 140; // window to sustain upward velocity (low gravity phase)
-const JUMP_LOW_GRAVITY_FACTOR = 0.55; // fraction of gravity applied while holding jump in sustain window
-const JUMP_SHORT_HOP_FACTOR = 0.35; // velocity multiplier on early release
-const COYOTE_MS = 80; // grace period after leaving ground to still jump
-const JUMP_BUFFER_MS = 90; // buffer window for jump pressed slightly before landing
-
-// Player colors map directly to headband variants.
-// Simple platform layout (x, y, width, height). y=0 is ground baseline.
-// const PLATFORMS = [
-//   { x: 0, y: 0, w: 1600, h: 40 },
-//   { x: 300, y: 240, w: 1000, h: 30 },
-//   { x: 100, y: 420, w: 400, h: 24 },
-//   { x: 1100, y: 420, w: 400, h: 24 },
-//   { x: 600, y: 560, w: 400, h: 24 }
-// ];
-// Simple platform layout (x, y, width, height). y=0 is ground baseline.
-const SNAPSHOT_INTERVAL_MS = 1000 / 30; // ~33ms → 30Hz snapshots for smoother remote motion
 
 const PLATFORMS = [
   // Ground platform
   { x: 0, y: 0, w: 1600, h: 40 },
-  
+
   // Lower level platforms
   { x: 200, y: 180, w: 200, h: 30 },
   { x: 500, y: 220, w: 300, h: 30 },
   { x: 950, y: 180, w: 200, h: 30 },
-  
+
   // Middle level platforms
   { x: 100, y: 360, w: 180, h: 24 },
   { x: 400, y: 400, w: 150, h: 24 },
   { x: 700, y: 360, w: 150, h: 24 },
   { x: 1000, y: 400, w: 180, h: 24 },
   { x: 1300, y: 360, w: 180, h: 24 },
-  
+
   // Upper level platforms
   { x: 300, y: 540, w: 200, h: 24 },
   { x: 750, y: 580, w: 300, h: 24 },
-  
+
   // Diagonal platforms (approximated with multiple small platforms)
   { x: 450, y: 300, w: 100, h: 24 },
   { x: 550, y: 340, w: 100, h: 24 },
   { x: 650, y: 380, w: 100, h: 24 },
-  
+
   // Additional platforms to fill in gaps
   { x: 850, y: 480, w: 120, h: 24 },
   { x: 1150, y: 520, w: 120, h: 24 }
@@ -99,30 +78,43 @@ const WORLD_PAYLOAD = {
   platforms: PLATFORMS
 };
 
+const WORLD_MIN_X = 0;
+const WORLD_MAX_X = WORLD_PAYLOAD.worldWidth;
+const WORLD_MIN_Y = 0;
+const WORLD_MAX_Y = WORLD_PAYLOAD.worldHeight + 360;
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function sanitizeName(name) {
+  return name?.substring(0, 16) || 'Player';
+}
+
 function defaultPlayerState(id, name) {
+  const now = Date.now();
   return {
     id,
-    name: name?.substring(0,16) || 'Player',
-    x: 800, // center spawn horizontally on middle platform
-    y: 270, // slightly above middle platform surface for gravity settle
+    name: sanitizeName(name),
+    x: 800,
+    y: 270,
     vx: 0,
     vy: 0,
     dir: 1,
-    isGrounded: false,
-    inputs: { left: false, right: false, jump: false },
+    grounded: false,
     isTagger: false,
-    lastTagTime: 0,
-    scoreTimeTaggedMs: 0, // cumulative time being tagger (lower is better maybe) or we can invert
-    // jump / platformer auxiliary state
-    jumpHeld: false,
-    jumpStartTime: 0,
-    canVariableJump: false,
-    lastGroundedTime: Date.now(),
-    bufferedJumpTime: 0,
-    lastReceivedInputSeq: 0,
-    lastProcessedInputSeq: 0,
-    color: null, // assigned when added to room
+    color: null,
     headbandId: null,
+    effects: [],
+    lastSeq: 0,
+    lastAcceptedStateAt: 0,
+    lastTagAttemptAt: 0,
+    lastStateAt: now
   };
 }
 
@@ -130,273 +122,330 @@ class GameRoom {
   constructor(code) {
     this.code = code;
     this.players = new Map();
+    this.powerUps = new Map();
     this.createdAt = Date.now();
-    this.state = 'waiting'; // waiting | countdown | running | ended
-    this.gameStartAt = null;
+    this.updatedAt = this.createdAt;
+    this.state = 'waiting';
     this.countdownStartAt = null;
-    this.lastTick = Date.now();
-    this.lastBroadcast = 0;
+    this.gameStartAt = null;
+    this.gameEndsAt = null;
+    this.endedAt = null;
     this.taggerId = null;
-  this.lastTagPairCooldown = new Map(); // deprecated (time-based) not used now
-  this.blockedContactPairs = new Set(); // pair keys that must separate before re-tag
-  this._colorIndex = 0;
+    this.leaderId = null;
+    this.blockedContactPairs = new Set();
+    this._colorIndex = 0;
+    this._startTimer = null;
+    this._endTimer = null;
   }
 
   addPlayer(socket, name) {
     const player = defaultPlayerState(socket.id, name);
-    this.players.set(socket.id, player);
-    // assign leader if none
-    if (!this.leaderId) this.leaderId = socket.id;
-    // assign a distinct headband variant from the shared palette, cycling for large rooms
     const headband = getHeadbandByIndex(this._colorIndex);
     player.color = headband.color;
     player.headbandId = headband.id;
     this._colorIndex++;
+
+    this.players.set(socket.id, player);
+    if (!this.leaderId) this.leaderId = socket.id;
+    this.updatedAt = Date.now();
+    return player;
   }
 
   removePlayer(id) {
-    this.players.delete(id);
-    if (this.players.size < 2 && this.state === 'running') {
-      this.endGame();
-    }
-    // reassign leader if needed
+    const removed = this.players.delete(id);
+    if (!removed) return false;
+
     if (this.leaderId === id) {
       const first = this.players.keys().next();
       this.leaderId = first && !first.done ? first.value : null;
-      if (this.leaderId) io.to(this.code).emit('leaderChanged', { leaderId: this.leaderId });
+    }
+
+    if (this.taggerId === id) {
+      const nextTagger = this.players.keys().next();
+      this.setTagger(nextTagger && !nextTagger.done ? nextTagger.value : null);
+    }
+
+    for (const key of Array.from(this.blockedContactPairs)) {
+      if (key.split('|').includes(id)) this.blockedContactPairs.delete(key);
+    }
+
+    if (this.players.size < 2 && this.state === 'countdown') {
+      this.cancelCountdown();
+    } else if (this.players.size < 2 && this.state === 'running') {
+      this.endGame(Date.now());
+    }
+
+    this.updatedAt = Date.now();
+    return true;
+  }
+
+  canJoin() {
+    return this.players.size < MAX_PLAYERS_PER_ROOM;
+  }
+
+  setTagger(id) {
+    this.taggerId = id || null;
+    for (const player of this.players.values()) {
+      player.isTagger = player.id === this.taggerId;
     }
   }
 
   startCountdown() {
-    if (this.state !== 'waiting' && this.state !== 'ended') return;
-    if (this.players.size < 2) return; // need at least 2 players
-    this.state = 'countdown';
-    this.countdownStartAt = Date.now();
-    // reset tagger flags
-    for (const p of this.players.values()) p.isTagger = false;
-    // choose random tagger
-    const ids = Array.from(this.players.keys());
-    this.taggerId = ids[Math.floor(Math.random()*ids.length)];
-    const p = this.players.get(this.taggerId);
-    if (p) p.isTagger = true;
-  }
-
-  startGame() {
-    this.state = 'running';
-    this.gameStartAt = Date.now();
-  }
-
-  endGame() {
-    if (this.state === 'ended') return;
-    this.state = 'ended';
-  }
-
-  updatePhysics(dt) {
-    // basic platformer physics
-  for (const player of this.players.values()) {
-      // freeze movement during countdown
-      if (this.state === 'countdown') {
-        player.vx = 0; player.vy = 0; continue;
-      }
-      const speed = BASE_SPEED * (player.isTagger ? TAGGER_SPEED_MULT : 1);
-      let ax = 0;
-      if (player.inputs.left) { ax -= speed; player.dir = -1; }
-      if (player.inputs.right) { ax += speed; player.dir = 1; }
-      player.vx = ax; // instant accel for simplicity
-      const now = Date.now();
-      // record last grounded time early (value from previous frame)
-      if (player.isGrounded) player.lastGroundedTime = now;
-
-      // Jump buffering & coyote logic
-      if (player.inputs.jumpPressed) {
-        if (player.isGrounded || (now - player.lastGroundedTime) <= COYOTE_MS) {
-          // start jump immediately
-          player.vy = JUMP_VELOCITY;
-          player.jumpStartTime = now;
-          player.canVariableJump = true;
-          player.isGrounded = false;
-        } else {
-          player.bufferedJumpTime = now; // store for later
-        }
-      }
-      // If landing soon after buffered press
-      if (player.bufferedJumpTime && (now - player.bufferedJumpTime) <= JUMP_BUFFER_MS) {
-        if (player.isGrounded || (now - player.lastGroundedTime) <= COYOTE_MS) {
-          player.vy = JUMP_VELOCITY;
-          player.jumpStartTime = now;
-          player.canVariableJump = true;
-          player.isGrounded = false;
-          player.bufferedJumpTime = 0;
-        }
-      }
-
-      // Apply gravity with variable jump sustain
-      if (player.vy > 0 && player.canVariableJump) {
-        const held = player.jumpHeld; // provided by input events
-        const elapsed = now - player.jumpStartTime;
-        if (player.inputs.jumpReleased) {
-          // early release short hop
-            player.vy *= JUMP_SHORT_HOP_FACTOR;
-            player.canVariableJump = false;
-        } else if (held && elapsed <= JUMP_SUSTAIN_MS) {
-          // reduced gravity while holding
-          player.vy -= GRAVITY * JUMP_LOW_GRAVITY_FACTOR * dt;
-        } else {
-          // full gravity now
-          player.vy -= GRAVITY * dt;
-          if (elapsed > JUMP_SUSTAIN_MS || !held) player.canVariableJump = false;
-        }
-      } else {
-        // normal gravity (descending or cannot variable)
-        player.vy -= GRAVITY * dt;
-        if (player.vy <= 0) player.canVariableJump = false; // once we start falling, stop sustain
-      }
-
-      // integrate
-  const prevY = player.y;
-  const prevVy = player.vy;
-  player.x += player.vx * dt;
-  player.y += player.vy * dt;
-
-      // simple world bounds
-      if (player.x < 0) player.x = 0;
-      if (player.x > 1600) player.x = 1600;
-
-      // collision with platforms (AABB feet)
-      player.isGrounded = false;
-      for (const plat of PLATFORMS) {
-        const topSurface = plat.y + plat.h; // y where feet rest
-        const underside = plat.y; // bottom of platform for ceiling checks
-        // horizontal overlap using player radius for better edge solidity
-        const overlapX = (player.x + PLAYER_RADIUS) > plat.x && (player.x - PLAYER_RADIUS) < (plat.x + plat.w);
-        const feetY = player.y;
-        // Landing (moving downward crossing through topSurface)
-        const crossingDown = overlapX && prevY >= topSurface && feetY < topSurface && prevVy <= 0;
-        if (crossingDown) {
-          player.y = topSurface;
-          player.vy = 0;
-          player.isGrounded = true;
-          player.canVariableJump = false; // landing ends variable phase
-          continue; // skip ceiling check for same frame/platform
-        }
-        // Ceiling (moving up: head passes underside)
-        const headPrev = prevY + PLAYER_HEIGHT;
-        const headNow = player.y + PLAYER_HEIGHT;
-        const crossingUpInto = overlapX && prevVy > 0 && headPrev <= underside && headNow > underside;
-        if (crossingUpInto) {
-          player.y = underside - PLAYER_HEIGHT; // place head just below underside
-          player.vy = 0; // cancel upward motion
-          player.canVariableJump = false; // hitting ceiling ends sustain
-        }
-      }
-      // If grounded ensure no sinking due to gravity accumulation rounding
-      if (player.isGrounded) {
-        player.vy = 0;
-      }
-
-    // clear one-shot inputs
-    player.inputs.jumpPressed = false;
-    player.inputs.jumpReleased = false;
-    player.inputs.jump = false; // legacy flag safe to keep false now
-    // mark processed inputs
-    player.lastProcessedInputSeq = player.lastReceivedInputSeq;
+    if (this.state !== 'waiting' && this.state !== 'ended') {
+      return { error: 'Game already started' };
     }
-  }
-
-  processTagging() {
-    if (this.state !== 'running') return;
-    const tagger = this.players.get(this.taggerId);
-    if (!tagger) return;
-    const inRangePairs = new Set();
-    // Check potential transfers
-    for (const player of this.players.values()) {
-      if (player.id === tagger.id) continue;
-      const dx = player.x - tagger.x;
-      const dy = player.y - tagger.y;
-      const distSq = dx*dx + dy*dy;
-      if (distSq < TAG_RADIUS*TAG_RADIUS) {
-        const key = this.cooldownKey(tagger.id, player.id);
-        inRangePairs.add(key);
-        if (!this.blockedContactPairs.has(key)) {
-          // Transfer tag immediately on first contact
-          tagger.isTagger = false;
-          player.isTagger = true;
-          this.taggerId = player.id;
-          // Block this pair until they separate
-          this.blockedContactPairs.add(key);
-          io.to(this.code).emit('tag', { taggerId: this.taggerId });
-          break; // only one transfer per tick
-        }
-      }
+    if (this.players.size < 2) {
+      return { error: 'Need at least 2 players' };
     }
-    // Unblock pairs that are no longer in contact
-    for (const key of Array.from(this.blockedContactPairs)) {
-      if (!inRangePairs.has(key)) this.blockedContactPairs.delete(key);
-    }
-  }
 
-  cooldownKey(a, b) { return [a,b].sort().join('|'); }
-
-  tick() {
+    this.clearTimers();
     const now = Date.now();
-    const dt = (now - this.lastTick)/1000;
-    this.lastTick = now;
+    this.state = 'countdown';
+    this.countdownStartAt = now;
+    this.gameStartAt = now + PRE_GAME_COUNTDOWN_MS;
+    this.gameEndsAt = this.gameStartAt + GAME_DURATION_MS;
+    this.endedAt = null;
+    this.blockedContactPairs.clear();
 
-    if (this.state === 'countdown') {
-      if (now - this.countdownStartAt >= PRE_GAME_COUNTDOWN_MS) this.startGame();
-    }
-    if (this.state === 'running') {
-      const elapsed = now - this.gameStartAt;
-      if (elapsed >= GAME_DURATION_MS) {
-        this.endGame();
-      } else {
-        // accumulate tagger score time
-        if (this.taggerId) {
-          const tagger = this.players.get(this.taggerId);
-          if (tagger) tagger.scoreTimeTaggedMs += (now - (this._prevTickTime || now));
-        }
-      }
-    }
+    const ids = Array.from(this.players.keys());
+    this.setTagger(ids[Math.floor(Math.random() * ids.length)]);
+    this.updatedAt = now;
 
-    this.updatePhysics(dt);
-    this.processTagging();
+    this._startTimer = setTimeout(() => {
+      this.startRunning();
+    }, Math.max(0, this.gameStartAt - Date.now()));
 
-    // broadcast state at ~30 Hz for smoother remote interpolation
-    if (now - this.lastBroadcast >= SNAPSHOT_INTERVAL_MS) {
-      this.broadcastState();
-      this.lastBroadcast = now;
-    }
-    this._prevTickTime = now;
+    this.broadcastRoomState();
+    return { ok: true };
   }
 
-  broadcastState() {
-    const payload = {
-      serverTime: Date.now(),
+  startRunning() {
+    if (this.state !== 'countdown') return;
+    if (this.players.size < 2) {
+      this.cancelCountdown();
+      return;
+    }
+
+    this.state = 'running';
+    this.updatedAt = Date.now();
+    this.broadcastRoomState();
+    this._endTimer = setTimeout(() => {
+      this.endGame(this.gameEndsAt);
+    }, Math.max(0, this.gameEndsAt - Date.now()));
+  }
+
+  cancelCountdown() {
+    this.clearTimers();
+    this.state = 'waiting';
+    this.countdownStartAt = null;
+    this.gameStartAt = null;
+    this.gameEndsAt = null;
+    this.setTagger(null);
+    this.updatedAt = Date.now();
+  }
+
+  endGame(endedAt = Date.now()) {
+    if (this.state === 'ended') return;
+    this.clearTimers();
+    this.state = 'ended';
+    this.endedAt = endedAt;
+    if (!this.gameEndsAt || this.gameEndsAt > endedAt) this.gameEndsAt = endedAt;
+    this.updatedAt = Date.now();
+    this.broadcastRoomState();
+  }
+
+  clearTimers() {
+    if (this._startTimer) clearTimeout(this._startTimer);
+    if (this._endTimer) clearTimeout(this._endTimer);
+    this._startTimer = null;
+    this._endTimer = null;
+  }
+
+  acceptPlayerState(id, rawState) {
+    const player = this.players.get(id);
+    if (!player || !rawState || typeof rawState !== 'object') return null;
+
+    const now = Date.now();
+    if (now - player.lastAcceptedStateAt < PLAYER_STATE_MIN_INTERVAL_MS) return null;
+
+    const seq = finiteNumber(rawState.seq);
+    if (seq !== null && seq <= player.lastSeq) return null;
+
+    const x = finiteNumber(rawState.x);
+    const y = finiteNumber(rawState.y);
+    const vx = finiteNumber(rawState.vx);
+    const vy = finiteNumber(rawState.vy);
+    if (x === null || y === null || vx === null || vy === null) return null;
+
+    const dirValue = finiteNumber(rawState.dir);
+    const dir = dirValue === null
+      ? player.dir
+      : (dirValue < 0 ? -1 : 1);
+    const groundedRaw = rawState.grounded ?? rawState.isGrounded;
+    const grounded = typeof groundedRaw === 'boolean' ? groundedRaw : player.grounded;
+
+    player.x = clamp(x, WORLD_MIN_X, WORLD_MAX_X);
+    player.y = clamp(y, WORLD_MIN_Y, WORLD_MAX_Y);
+    player.vx = clamp(vx, -MAX_ABS_VELOCITY, MAX_ABS_VELOCITY);
+    player.vy = clamp(vy, -MAX_ABS_VELOCITY, MAX_ABS_VELOCITY);
+    player.dir = dir;
+    player.grounded = grounded;
+    player.lastAcceptedStateAt = now;
+    player.lastStateAt = now;
+    if (seq !== null) player.lastSeq = seq;
+    this.updatedAt = now;
+
+    this.refreshTagContactBlocks();
+
+    return {
+      x: player.x,
+      y: player.y,
+      vx: player.vx,
+      vy: player.vy,
+      dir: player.dir,
+      grounded: player.grounded,
+      seq: player.lastSeq,
+      clientTime: finiteNumber(rawState.clientTime),
+      serverTime: now
+    };
+  }
+
+  tryTag(senderId, targetId) {
+    const now = Date.now();
+    const tagger = this.players.get(senderId);
+    const target = this.players.get(targetId);
+    if (this.state !== 'running') return { error: 'Game is not running' };
+    if (!tagger || !target || senderId === targetId) return { error: 'Invalid target' };
+    if (senderId !== this.taggerId) return { error: 'Only current tagger can tag' };
+    if (now < this.gameStartAt || now >= this.gameEndsAt) return { error: 'Outside game time' };
+    if (now - tagger.lastTagAttemptAt < TAG_ATTEMPT_MIN_INTERVAL_MS) return { error: 'Tag rate limited' };
+
+    tagger.lastTagAttemptAt = now;
+    this.refreshTagContactBlocks();
+
+    const key = this.cooldownKey(senderId, targetId);
+    if (this.blockedContactPairs.has(key)) return { error: 'Players must separate before re-tagging' };
+    if (!this.isLooseTagValid(tagger, target)) return { error: 'Players are too far apart' };
+
+    this.setTagger(targetId);
+    this.blockedContactPairs.add(key);
+    this.updatedAt = now;
+
+    io.to(this.code).emit('tag', {
+      taggerId: targetId,
+      taggedById: senderId,
+      serverTime: now
+    });
+
+    return { ok: true };
+  }
+
+  isLooseTagValid(tagger, target) {
+    const maxDistance = TAG_RADIUS + TAG_VALIDATION_GRACE_PX;
+    const dx = target.x - tagger.x;
+    const dy = target.y - tagger.y;
+    return dx * dx + dy * dy <= maxDistance * maxDistance;
+  }
+
+  refreshTagContactBlocks() {
+    for (const key of Array.from(this.blockedContactPairs)) {
+      const [a, b] = key.split('|');
+      const playerA = this.players.get(a);
+      const playerB = this.players.get(b);
+      if (!playerA || !playerB) {
+        this.blockedContactPairs.delete(key);
+        continue;
+      }
+
+      const dx = playerB.x - playerA.x;
+      const dy = playerB.y - playerA.y;
+      const separationRadius = TAG_RADIUS + 4;
+      if (dx * dx + dy * dy > separationRadius * separationRadius) {
+        this.blockedContactPairs.delete(key);
+      }
+    }
+  }
+
+  cooldownKey(a, b) {
+    return [a, b].sort().join('|');
+  }
+
+  claimPowerUp(playerId, rawPowerUpId) {
+    const player = this.players.get(playerId);
+    const powerUpId = String(rawPowerUpId || '');
+    const powerUp = this.powerUps.get(powerUpId);
+    const now = Date.now();
+
+    if (!player) return { error: 'Player not found' };
+    if (!powerUp || powerUp.claimedBy || (powerUp.expiresAt && powerUp.expiresAt <= now)) {
+      return { error: 'Power-up unavailable' };
+    }
+
+    powerUp.claimedBy = playerId;
+    const effect = {
+      type: powerUp.type,
+      startedAt: now,
+      expiresAt: now + EFFECT_DEFAULT_MS,
+      params: powerUp.params || {}
+    };
+
+    player.effects = player.effects.filter(existing => !existing.expiresAt || existing.expiresAt > now);
+    player.effects.push(effect);
+    this.updatedAt = now;
+
+    io.to(this.code).emit('effectApplied', {
+      playerId,
+      effect,
+      expiresAt: effect.expiresAt,
+      serverTime: now
+    });
+    this.broadcastRoomState();
+
+    return { ok: true, effect };
+  }
+
+  roomStatePayload() {
+    const now = Date.now();
+    return {
+      serverTime: now,
       state: this.state,
-      countdownRemainingMs: this.state === 'countdown' ? Math.max(0, PRE_GAME_COUNTDOWN_MS - (Date.now()-this.countdownStartAt)) : 0,
-      gameRemainingMs: this.state === 'running' ? Math.max(0, GAME_DURATION_MS - (Date.now()-this.gameStartAt)) : 0,
-      players: Array.from(this.players.values()).map(p => ({
-        id: p.id,
-        name: p.name,
-        x: p.x,
-        y: p.y,
-        dir: p.dir,
-        isTagger: p.isTagger,
-        vx: p.vx,
-        vy: p.vy,
-        lastProcessedInputSeq: p.lastProcessedInputSeq,
-        color: p.color,
-        headbandId: p.headbandId,
-        grounded: p.isGrounded,
-      })),
+      gameStartAt: this.gameStartAt,
+      gameEndsAt: this.gameEndsAt,
+      players: Array.from(this.players.values()).map(player => this.serializePlayer(player, now)),
       taggerId: this.taggerId,
       leaderId: this.leaderId,
+      powerUps: Array.from(this.powerUps.values()),
+      effects: Object.fromEntries(Array.from(this.players.values()).map(player => [
+        player.id,
+        player.effects.filter(effect => !effect.expiresAt || effect.expiresAt > now)
+      ]))
     };
-    io.to(this.code).emit('state', payload);
+  }
+
+  serializePlayer(player, now = Date.now()) {
+    return {
+      id: player.id,
+      name: player.name,
+      x: player.x,
+      y: player.y,
+      dir: player.dir,
+      isTagger: player.isTagger,
+      vx: player.vx,
+      vy: player.vy,
+      color: player.color,
+      headbandId: player.headbandId,
+      grounded: player.grounded,
+      effects: player.effects.filter(effect => !effect.expiresAt || effect.expiresAt > now)
+    };
+  }
+
+  broadcastRoomState() {
+    io.to(this.code).emit('roomState', this.roomStatePayload());
   }
 }
 
 const rooms = new Map();
+const socketRoomCodes = new Map();
 
 function createRoom() {
   let code;
@@ -410,75 +459,152 @@ function getRoom(code) {
   return rooms.get(code);
 }
 
+function getSocketRoom(socketId) {
+  const code = socketRoomCodes.get(socketId);
+  return code ? rooms.get(code) : null;
+}
+
 function emitWorld(socket) {
   socket.emit('world', WORLD_PAYLOAD);
 }
 
+function deleteRoom(code, reason = 'cleanup') {
+  const room = rooms.get(code);
+  if (!room) return;
+
+  room.clearTimers();
+  rooms.delete(code);
+  for (const playerId of room.players.keys()) {
+    socketRoomCodes.delete(playerId);
+  }
+
+  io.to(code).emit('roomClosed', { reason });
+  io.in(code).socketsLeave(code);
+}
+
+function leaveCurrentRoom(socket, reason = 'left') {
+  const code = socketRoomCodes.get(socket.id);
+  if (!code) return;
+
+  socketRoomCodes.delete(socket.id);
+  socket.leave(code);
+
+  const room = rooms.get(code);
+  if (!room) return;
+
+  room.removePlayer(socket.id);
+  if (room.players.size === 0) {
+    deleteRoom(code, 'empty');
+    return;
+  }
+
+  socket.to(code).emit('playerLeft', { id: socket.id, reason });
+  room.broadcastRoomState();
+}
+
+// Socket.IO protocol:
+// - roomState: low-frequency lifecycle + metadata snapshot for create/join/start/tag/leave.
+// - playerState: compact client-owned kinematic update, accepted at about 30 Hz and relayed to peers.
+// - tagPlayer/tag: current tagger proposes contact; server verifies same-room/current-tagger/loose range.
+// - claimPowerup/effectApplied: future shared-event path for server-approved pickups and timed effects.
 io.on('connection', socket => {
-  socket.on('createRoom', ({ name }, cb) => {
+  socket.on('createRoom', ({ name } = {}, cb) => {
+    leaveCurrentRoom(socket, 'switch-room');
+
     const room = createRoom();
     socket.join(room.code);
+    socketRoomCodes.set(socket.id, room.code);
     room.addPlayer(socket, name);
     emitWorld(socket);
     cb?.({ code: room.code });
+    room.broadcastRoomState();
   });
 
-  socket.on('joinRoom', ({ code, name }, cb) => {
-    const room = getRoom(code);
-    if (!room) return cb?.({ error: 'Room not found'});
-    socket.join(code);
+  socket.on('joinRoom', ({ code, name } = {}, cb) => {
+    const normalizedCode = String(code || '').trim().toUpperCase();
+    const room = getRoom(normalizedCode);
+    if (!room) return cb?.({ error: 'Room not found' });
+    if (!room.canJoin()) return cb?.({ error: 'Room is full' });
+
+    leaveCurrentRoom(socket, 'switch-room');
+    socket.join(normalizedCode);
+    socketRoomCodes.set(socket.id, normalizedCode);
     room.addPlayer(socket, name);
     emitWorld(socket);
     cb?.({ ok: true });
+    room.broadcastRoomState();
   });
 
-  socket.on('startGame', ({ code }, cb) => {
-    const room = getRoom(code);
+  socket.on('startGame', ({ code } = {}, cb) => {
+    const mappedCode = socketRoomCodes.get(socket.id);
+    const normalizedCode = String(code || mappedCode || '').trim().toUpperCase();
+    if (!mappedCode || mappedCode !== normalizedCode) return cb?.({ error: 'Not in that room' });
+
+    const room = getRoom(normalizedCode);
     if (!room) return cb?.({ error: 'Room not found' });
     if (room.leaderId !== socket.id) return cb?.({ error: 'Only leader can start' });
-    room.startCountdown();
-    cb?.({ ok: true });
+
+    const result = room.startCountdown();
+    cb?.(result);
   });
 
-  socket.on('input', ({ left, right, jump, jumpPressed, jumpReleased, seq }) => {
-    for (const room of rooms.values()) {
-      const player = room.players.get(socket.id);
-      if (player) {
-        if (typeof left === 'boolean') player.inputs.left = left;
-        if (typeof right === 'boolean') player.inputs.right = right;
-        if (typeof jump === 'boolean') { player.jumpHeld = jump; }
-        if (jumpPressed) player.inputs.jumpPressed = true;
-        if (jumpReleased) player.inputs.jumpReleased = true;
-        if (typeof seq === 'number' && seq > player.lastReceivedInputSeq) player.lastReceivedInputSeq = seq;
-      }
-    }
+  socket.on('playerState', payload => {
+    const room = getSocketRoom(socket.id);
+    if (!room) return;
+
+    const accepted = room.acceptPlayerState(socket.id, payload);
+    if (!accepted) return;
+
+    socket.to(room.code).emit('playerState', {
+      id: socket.id,
+      x: accepted.x,
+      y: accepted.y,
+      vx: accepted.vx,
+      vy: accepted.vy,
+      dir: accepted.dir,
+      grounded: accepted.grounded,
+      seq: accepted.seq,
+      clientTime: accepted.clientTime,
+      serverTime: accepted.serverTime
+    });
+  });
+
+  socket.on('tagPlayer', ({ targetId } = {}, cb) => {
+    const room = getSocketRoom(socket.id);
+    if (!room) return cb?.({ error: 'Not in a room' });
+
+    const result = room.tryTag(socket.id, String(targetId || ''));
+    cb?.(result);
+  });
+
+  socket.on('claimPowerup', ({ id } = {}, cb) => {
+    const room = getSocketRoom(socket.id);
+    if (!room) return cb?.({ error: 'Not in a room' });
+
+    cb?.(room.claimPowerUp(socket.id, id));
   });
 
   socket.on('disconnect', () => {
-    for (const room of rooms.values()) {
-      if (room.players.has(socket.id)) {
-        room.removePlayer(socket.id);
-        io.to(room.code).emit('playerLeft', { id: socket.id });
-      }
-    }
+    leaveCurrentRoom(socket, 'disconnect');
   });
 
   // Lightweight latency echo (client sends timestamp, we immediately echo it back)
-  socket.on('latencyPing', ({ t }) => {
-    // Echo back the original client timestamp so client can compute RTT precisely
+  socket.on('latencyPing', ({ t } = {}) => {
     socket.emit('latencyPong', { t });
   });
 });
 
-// main game loop
 setInterval(() => {
-  for (const room of rooms.values()) {
-    room.tick();
+  const now = Date.now();
+  for (const [code, room] of rooms) {
     if (room.state === 'ended') {
-      // could auto clean after some time
+      const inactiveSince = Math.max(room.endedAt || 0, room.updatedAt || 0);
+      if (inactiveSince && now - inactiveSince >= ENDED_ROOM_TTL_MS) {
+        deleteRoom(code, 'ended-ttl');
+      }
     }
   }
-}, 1000 / TICK_RATE);
+}, ROOM_CLEANUP_INTERVAL_MS);
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
