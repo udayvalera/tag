@@ -1,6 +1,6 @@
 import '/socket.io/socket.io.js';
 import { SceneDecorator, ensureCtxRoundRectSupport } from './render.js';
-import { MOTION_LINES_SPRITE, PARTICLE_TUNING, PLAYER_COLLISION } from './game-config.js';
+import { MOTION_LINES_SPRITE, PARTICLE_TUNING, PLAYER_COLLISION, TIMER_FONT } from './game-config.js';
 
 const socket = io();
 
@@ -40,6 +40,52 @@ function escapeHtml(value) {
     .replaceAll('>', '&gt;')
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#039;');
+}
+
+const TIMER_GLYPH_INDEXES = new Map([...TIMER_FONT.glyphs].map((glyph, index) => [glyph, index]));
+
+function formatTimerLabel(remainingMs) {
+  const totalSeconds = Math.max(0, Math.ceil(Math.max(0, remainingMs) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function renderSpriteTimer(remainingMs) {
+  const timerEl = elem('timer');
+  if (!timerEl) return;
+
+  const label = formatTimerLabel(remainingMs);
+  const isPressure = remainingMs <= TIMER_FONT.pressureThresholdMs;
+  const font = isPressure ? TIMER_FONT.pressure : TIMER_FONT.normal;
+  const key = `${label}|${isPressure ? 'pressure' : 'normal'}`;
+
+  setHidden(timerEl, false);
+  timerEl.classList.toggle('pressure', isPressure);
+  timerEl.style.setProperty('--timer-cell-width', `${font.cellWidth}px`);
+  timerEl.style.setProperty('--timer-cell-height', `${font.cellHeight}px`);
+  timerEl.setAttribute('aria-label', `Time remaining ${label}`);
+
+  if (timerEl.dataset.timerKey === key) return;
+  timerEl.dataset.timerKey = key;
+
+  const glyphs = [...label].map((glyph) => {
+    const index = TIMER_GLYPH_INDEXES.get(glyph) ?? 0;
+    return `<i class="timerGlyph" aria-hidden="true" style="background-position: -${index * font.cellWidth}px 0"></i>`;
+  }).join('');
+  setHtmlIfChanged(timerEl, glyphs);
+}
+
+function clearSpriteTimer() {
+  const timerEl = elem('timer');
+  if (!timerEl) return;
+  delete timerEl.dataset.timerKey;
+  timerEl.classList.remove('pressure');
+  timerEl.removeAttribute('aria-label');
+  timerEl.style.removeProperty('--timer-cell-width');
+  timerEl.style.removeProperty('--timer-cell-height');
+  setHtmlIfChanged(timerEl, '');
+  setHidden(timerEl, true);
 }
 
 // --- Latency / Ping Measurement ---
@@ -889,10 +935,11 @@ function draw(now = performance.now()) {
   }
 
   if (state === 'running') {
-    const timeLeft = (gameRemainingMs / 1000).toFixed(1);
-    setHtmlIfChanged(elem('timer'), `TIME ${timeLeft}s`);
+    renderSpriteTimer(gameRemainingMs);
     const taggerName = players.find(p => p.id === taggerId)?.name || 'Nobody';
     setHtmlIfChanged(elem('tagger'), `IT ${escapeHtml(taggerName)}`);
+  } else {
+    clearSpriteTimer();
   }
 
   if (state === 'ended') {

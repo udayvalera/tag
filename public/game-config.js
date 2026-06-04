@@ -20,6 +20,21 @@ export const MOTION_LINES_SPRITE = Object.freeze({
   alpha: 0.74,
 });
 
+export const TIMER_FONT = Object.freeze({
+  glyphs: '0123456789:',
+  pressureThresholdMs: 10_000,
+  normal: Object.freeze({
+    asset: 'timer-font-normal.png',
+    cellWidth: 12,
+    cellHeight: 16,
+  }),
+  pressure: Object.freeze({
+    asset: 'timer-font-pressure.png',
+    cellWidth: 14,
+    cellHeight: 18,
+  }),
+});
+
 export const PARTICLE_TUNING = Object.freeze({
   maxPuffs: 18,
   runIntervalMs: 125,

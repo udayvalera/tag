@@ -336,6 +336,56 @@ input.code {
   box-shadow: inset 0 -2px 0 rgba(189, 239, 255, 0.72);
 }
 
+.timerHud {
+  --timer-cell-width: 12px;
+  --timer-cell-height: 16px;
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  z-index: 130;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  max-width: none;
+  min-height: 0;
+  padding: 5px 8px 4px;
+  overflow: visible;
+  background: rgba(248, 255, 246, 0.5);
+  border: 2px solid rgba(23, 54, 77, 0.58);
+  box-shadow:
+    0 2px 0 rgba(3, 78, 88, 0.38),
+    inset 0 -2px 0 rgba(189, 239, 255, 0.54);
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.timerHud.pressure {
+  gap: 3px;
+  padding: 6px 10px 5px;
+  background: rgba(255, 248, 178, 0.68);
+  border-color: rgba(23, 54, 77, 0.76);
+  box-shadow:
+    0 3px 0 rgba(197, 29, 99, 0.54),
+    0 5px 0 rgba(3, 78, 88, 0.36),
+    inset 0 -2px 0 rgba(255, 116, 175, 0.44);
+  animation: timerPressurePulse 620ms steps(2, end) infinite;
+}
+
+.timerGlyph {
+  display: block;
+  flex: 0 0 var(--timer-cell-width);
+  width: var(--timer-cell-width);
+  height: var(--timer-cell-height);
+  background-image: url('./assets/timer-font-normal.png');
+  background-repeat: no-repeat;
+  image-rendering: pixelated;
+}
+
+.timerHud.pressure .timerGlyph {
+  background-image: url('./assets/timer-font-pressure.png');
+}
+
 #statusBar span:empty {
   display: none;
 }
@@ -433,6 +483,16 @@ input.code {
   }
   to {
     transform: translateY(-4px);
+  }
+}
+
+@keyframes timerPressurePulse {
+  0%,
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+  50% {
+    transform: translateX(-50%) scale(1.045);
   }
 }
 
@@ -735,8 +795,12 @@ body[data-game-state="waiting"] .playerList .playerListToggle::after {
     left: 10px;
     right: auto;
     gap: 5px;
-    max-width: calc(100vw - 20px);
+    max-width: min(300px, calc(50vw - 48px));
     font-size: 8px;
+  }
+
+  .timerHud {
+    top: 10px;
   }
 
   #statusBar span {
@@ -793,6 +857,15 @@ body[data-game-state="waiting"] .playerList .playerListToggle::after {
 
   #statusBar {
     align-items: flex-start;
+  }
+
+  body[data-game-state="running"] #statusBar {
+    top: 44px;
+    max-width: calc(100vw - 20px);
+  }
+
+  body[data-game-state="running"] .playerList.gameplay {
+    top: 96px;
   }
 
   #statusBar #tagger {
