@@ -11,6 +11,37 @@ export const PLAYER_COLLISION = Object.freeze({
   tagRadius: 32,
 });
 
+function finiteOrZero(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+export function playerBodyDistanceSq(playerA, playerB, height = PLAYER_COLLISION.height) {
+  const ax = finiteOrZero(playerA?.x);
+  const bx = finiteOrZero(playerB?.x);
+  const ay = finiteOrZero(playerA?.y);
+  const by = finiteOrZero(playerB?.y);
+  const bodyHeight = Math.max(0, finiteOrZero(height));
+
+  const dx = bx - ax;
+  const aTop = ay + bodyHeight;
+  const bTop = by + bodyHeight;
+  let verticalGap = 0;
+
+  if (aTop < by) {
+    verticalGap = by - aTop;
+  } else if (bTop < ay) {
+    verticalGap = ay - bTop;
+  }
+
+  return dx * dx + verticalGap * verticalGap;
+}
+
+export function arePlayerBodiesWithinRange(playerA, playerB, range = PLAYER_COLLISION.tagRadius) {
+  const tagRange = Math.max(0, finiteOrZero(range));
+  return playerBodyDistanceSq(playerA, playerB) <= tagRange * tagRange;
+}
+
 export const MOTION_LINES_SPRITE = Object.freeze({
   asset: 'wind-motion-lines-sprite.png',
   frameWidth: 32,

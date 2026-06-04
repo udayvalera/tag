@@ -203,7 +203,6 @@ const MIN_INTERP_DELAY_MS = 45; // clamp for low-ping sessions so remotes stay <
 const MAX_REMOTE_EXTRAP_MS = 40; // allow gentle extrapolation when new snapshots haven't arrived
 const MAX_HISTORY = 45;
 const PLAYER_STATE_SEND_INTERVAL_MS = 1000 / 30;
-const TAG_ATTEMPT_INTERVAL_MS = 140;
 
 // Physics constants (must mirror server)
 const BASE_SPEED = 220;
@@ -231,7 +230,6 @@ let lastRenderDelayMs = BASE_INTERP_DELAY_MS;
 let serverClockOffsetMs = 0;
 let hasServerClockOffset = false;
 let lastPlayerStateSentAt = 0;
-let lastTagAttemptAt = 0;
 
 // Mirror advanced jump tuning (keep in sync with server where possible)
 const JUMP_SUSTAIN_MS = 140;
@@ -692,26 +690,6 @@ function sendLocalPlayerState(now) {
   });
 }
 
-function maybeEmitTagAttempt(renderedPlayers, now, state) {
-  if (state !== 'running') return;
-  if (!localPlayer.id || gameState.taggerId !== localPlayer.id) return;
-  if (!socket.connected || now - lastTagAttemptAt < TAG_ATTEMPT_INTERVAL_MS) return;
-
-  const tagRadiusSq = PLAYER_COLLISION.tagRadius * PLAYER_COLLISION.tagRadius;
-  for (const [targetId, remotePlayer] of renderedPlayers) {
-    const dx = remotePlayer.x - localPlayer.x;
-    const dy = remotePlayer.y - localPlayer.y;
-    if (dx * dx + dy * dy <= tagRadiusSq) {
-      lastTagAttemptAt = now;
-      socket.emit('tagPlayer', {
-        targetId,
-        clientTime: compactNumber(now)
-      });
-      return;
-    }
-  }
-}
-
 // Render loop
 function draw(now = performance.now()) {
   requestAnimationFrame(draw);
@@ -847,8 +825,6 @@ function draw(now = performance.now()) {
       grounded
     });
   }
-
-  maybeEmitTagAttempt(rendered, now, state);
 
   for (const [id, rp] of rendered) {
     spawnRunSmoke(id, rp, now);
